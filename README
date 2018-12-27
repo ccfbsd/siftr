@@ -1,0 +1,7 @@
+# siftr
+This is my update to freebsd/siftr, full name "Statistical Information For TCP Research".
+
+Its original FreeBSD Manual Page can be found here:
+https://www.freebsd.org/cgi/man.cgi?query=siftr
+
+I add a Makefile for local compile, assuming your freebsd source tree is at /usr/src.
