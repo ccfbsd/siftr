@@ -1443,13 +1443,15 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 
 	new = siftr_enabled;
 	error = sysctl_handle_int(oidp, &new, 0, req);
-	if (error != 0 && req->newptr != NULL) {
+	if (error == 0 && req->newptr != NULL) {
 		if (new > 1)
 			return (EINVAL);
 		else if (new != siftr_enabled) {
-			error = siftr_manage_ops(new);
-			if (error != 0)
+			if ((error = siftr_manage_ops(new)) == 0) {
+				siftr_enabled = new;
+			} else {
 				siftr_manage_ops(SIFTR_DISABLE);
+			}
 		}
 	}
 
