@@ -1197,24 +1197,13 @@ siftr_manage_ops(uint8_t action)
 	struct timeval tval;
 	struct flow_hash_node *counter, *tmp_counter;
 	struct sbuf *s;
-	int i, key_index, ret, error;
-	uint32_t bytes_to_write, total_skipped_pkts;
-	uint16_t lport, fport;
-	uint8_t *key, ipver;
-
-#ifdef SIFTR_IPV6
-	uint32_t laddr[4];
-	uint32_t faddr[4];
-#else
-	uint8_t laddr[4];
-	uint8_t faddr[4];
-#endif
-
-	error = 0;
-	total_skipped_pkts = 0;
+	int i, ret, error = 0;
+	uint32_t bytes_to_write, total_skipped_pkts = 0;
+	struct sbuf sb;
+	char buf[480];
 
 	/* Init an autosizing sbuf that initially holds 200 chars. */
-	if ((s = sbuf_new(NULL, NULL, 200, SBUF_AUTOEXTEND)) == NULL)
+	if ((s = sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN)) == NULL)
 		return (-1);
 
 	if (action == SIFTR_ENABLE) {
@@ -1308,7 +1297,7 @@ siftr_manage_ops(uint8_t action)
 		    "num_outbound_skipped_pkts_tcpcb=%u\t"
 		    "num_inbound_skipped_pkts_inpcb=%u\t"
 		    "num_outbound_skipped_pkts_inpcb=%u\t"
-		    "total_skipped_tcp_pkts=%u\tflow_list=",
+		    "total_skipped_tcp_pkts=%u",
 		    (intmax_t)tval.tv_sec,
 		    tval.tv_usec,
 		    (uintmax_t)totalss.n_in,
@@ -1332,78 +1321,6 @@ siftr_manage_ops(uint8_t action)
 		for (i = 0; i <= siftr_hashmask; i++) {
 			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
 			    tmp_counter) {
-				key = counter->key;
-				key_index = 1;
-
-				ipver = key[0];
-
-				memcpy(laddr, key + key_index, sizeof(laddr));
-				key_index += sizeof(laddr);
-				memcpy(&lport, key + key_index, sizeof(lport));
-				key_index += sizeof(lport);
-				memcpy(faddr, key + key_index, sizeof(faddr));
-				key_index += sizeof(faddr);
-				memcpy(&fport, key + key_index, sizeof(fport));
-
-#ifdef SIFTR_IPV6
-				laddr[3] = ntohl(laddr[3]);
-				faddr[3] = ntohl(faddr[3]);
-
-				if (ipver == INP_IPV6) {
-					laddr[0] = ntohl(laddr[0]);
-					laddr[1] = ntohl(laddr[1]);
-					laddr[2] = ntohl(laddr[2]);
-					faddr[0] = ntohl(faddr[0]);
-					faddr[1] = ntohl(faddr[1]);
-					faddr[2] = ntohl(faddr[2]);
-
-					sbuf_printf(s,
-					    "%x:%x:%x:%x:%x:%x:%x:%x;%u-"
-					    "%x:%x:%x:%x:%x:%x:%x:%x;%u,",
-					    UPPER_SHORT(laddr[0]),
-					    LOWER_SHORT(laddr[0]),
-					    UPPER_SHORT(laddr[1]),
-					    LOWER_SHORT(laddr[1]),
-					    UPPER_SHORT(laddr[2]),
-					    LOWER_SHORT(laddr[2]),
-					    UPPER_SHORT(laddr[3]),
-					    LOWER_SHORT(laddr[3]),
-					    ntohs(lport),
-					    UPPER_SHORT(faddr[0]),
-					    LOWER_SHORT(faddr[0]),
-					    UPPER_SHORT(faddr[1]),
-					    LOWER_SHORT(faddr[1]),
-					    UPPER_SHORT(faddr[2]),
-					    LOWER_SHORT(faddr[2]),
-					    UPPER_SHORT(faddr[3]),
-					    LOWER_SHORT(faddr[3]),
-					    ntohs(fport));
-				} else {
-					laddr[0] = FIRST_OCTET(laddr[3]);
-					laddr[1] = SECOND_OCTET(laddr[3]);
-					laddr[2] = THIRD_OCTET(laddr[3]);
-					laddr[3] = FOURTH_OCTET(laddr[3]);
-					faddr[0] = FIRST_OCTET(faddr[3]);
-					faddr[1] = SECOND_OCTET(faddr[3]);
-					faddr[2] = THIRD_OCTET(faddr[3]);
-					faddr[3] = FOURTH_OCTET(faddr[3]);
-#endif
-					sbuf_printf(s,
-					    "%u.%u.%u.%u;%u-%u.%u.%u.%u;%u,",
-					    laddr[0],
-					    laddr[1],
-					    laddr[2],
-					    laddr[3],
-					    ntohs(lport),
-					    faddr[0],
-					    faddr[1],
-					    faddr[2],
-					    faddr[3],
-					    ntohs(fport));
-#ifdef SIFTR_IPV6
-				}
-#endif
-
 				free(counter, M_SIFTR_HASHNODE);
 			}
 
@@ -1443,13 +1360,15 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 
 	new = siftr_enabled;
 	error = sysctl_handle_int(oidp, &new, 0, req);
-	if (error != 0 && req->newptr != NULL) {
+	if (error == 0 && req->newptr != NULL) {
 		if (new > 1)
 			return (EINVAL);
 		else if (new != siftr_enabled) {
-			error = siftr_manage_ops(new);
-			if (error != 0)
+			if ((error = siftr_manage_ops(new)) == 0) {
+				siftr_enabled = new;
+			} else {
 				siftr_manage_ops(SIFTR_DISABLE);
+			}
 		}
 	}
 
