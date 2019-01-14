@@ -238,6 +238,7 @@ struct pkt_node {
 struct flow_hash_node
 {
 	uint16_t counter;
+	u_long last_cwnd;
 	uint8_t key[FLOW_KEY_LEN];
 	LIST_ENTRY(flow_hash_node) nodes;
 };
@@ -270,6 +271,8 @@ static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
 static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
 static unsigned int siftr_generate_hashes = 0;
+static unsigned int siftr_port_filter = 0;
+static unsigned int siftr_cwnd_filter = 0;
 /* static unsigned int siftr_binary_log = 0; */
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr.log";
@@ -314,6 +317,14 @@ SYSCTL_UINT(_net_inet_siftr, OID_AUTO, ppl, CTLFLAG_RW,
 SYSCTL_UINT(_net_inet_siftr, OID_AUTO, genhashes, CTLFLAG_RW,
     &siftr_generate_hashes, 0,
     "enable packet hash generation");
+
+SYSCTL_UINT(_net_inet_siftr, OID_AUTO, port_filter, CTLFLAG_RW,
+    &siftr_port_filter, 0,
+    "enable packet filter on a TCP port");
+
+SYSCTL_UINT(_net_inet_siftr, OID_AUTO, cwnd_filter, CTLFLAG_RW,
+    &siftr_cwnd_filter, 0,
+    "enable packet filter on TCP congestion window");
 
 /* XXX: TODO
 SYSCTL_UINT(_net_inet_siftr, OID_AUTO, binary, CTLFLAG_RW,
@@ -407,7 +418,26 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 
 			return;
 		}
-	} else if (siftr_pkts_per_log > 1) {
+	} else if ((siftr_pkts_per_log > 1) && (siftr_cwnd_filter)) {
+		if (hash_node->last_cwnd == pkt_node->snd_cwnd) {
+			/*
+			 * See below comment about siftr_pkts_per_log.
+			 */
+			hash_node->counter = (hash_node->counter + 1) %
+					     siftr_pkts_per_log;
+			if (hash_node->counter > 0) {
+				return;
+			}
+		} else {
+			hash_node->last_cwnd = pkt_node->snd_cwnd;
+		}
+	} else if ((siftr_pkts_per_log <= 1) && (siftr_cwnd_filter)) {
+		if (hash_node->last_cwnd == pkt_node->snd_cwnd) {
+			return;
+		} else {
+			hash_node->last_cwnd = pkt_node->snd_cwnd;
+		}
+	} else if ((siftr_pkts_per_log > 1) && (!siftr_cwnd_filter)) {
 		/*
 		 * Taking the remainder of the counter divided
 		 * by the current value of siftr_pkts_per_log
@@ -902,6 +932,12 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		else
 			ss->nskip_out_tcpcb++;
 
+		goto inp_unlock;
+	}
+
+	/* only pkts selected by the tcp port filter can be inserted into the pkt_queue */
+	if (siftr_port_filter && (siftr_port_filter != ntohs(inp->inp_lport)) &&
+	    (siftr_port_filter != ntohs(inp->inp_fport))) {
 		goto inp_unlock;
 	}
 
