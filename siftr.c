@@ -176,16 +176,16 @@ struct pkt_node {
 	uint32_t		hash;
 	/* Local/foreign IP address. */
 #ifdef SIFTR_IPV6
-	uint32_t		ip_laddr[4];
-	uint32_t		ip_faddr[4];
+	uint32_t		laddr[4];
+	uint32_t		faddr[4];
 #else
-	uint8_t			ip_laddr[4];
-	uint8_t			ip_faddr[4];
+	uint8_t			laddr[4];
+	uint8_t			faddr[4];
 #endif
 	/* Local TCP port. */
-	uint16_t		tcp_localport;
+	uint16_t		lport;
 	/* Foreign TCP port. */
-	uint16_t		tcp_foreignport;
+	uint16_t		fport;
 	/* Congestion Window (bytes). */
 	u_long			snd_cwnd;
 	/* Sending Window (bytes). */
@@ -356,17 +356,17 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	 * ipversion, localip, localport, foreignip, foreignport
 	 */
 	key[0] = pkt_node->ipver;
-	memcpy(key + key_offset, &pkt_node->ip_laddr,
-	    sizeof(pkt_node->ip_laddr));
-	key_offset += sizeof(pkt_node->ip_laddr);
-	memcpy(key + key_offset, &pkt_node->tcp_localport,
-	    sizeof(pkt_node->tcp_localport));
-	key_offset += sizeof(pkt_node->tcp_localport);
-	memcpy(key + key_offset, &pkt_node->ip_faddr,
-	    sizeof(pkt_node->ip_faddr));
-	key_offset += sizeof(pkt_node->ip_faddr);
-	memcpy(key + key_offset, &pkt_node->tcp_foreignport,
-	    sizeof(pkt_node->tcp_foreignport));
+	memcpy(key + key_offset, &pkt_node->laddr,
+	    sizeof(pkt_node->laddr));
+	key_offset += sizeof(pkt_node->laddr);
+	memcpy(key + key_offset, &pkt_node->lport,
+	    sizeof(pkt_node->lport));
+	key_offset += sizeof(pkt_node->lport);
+	memcpy(key + key_offset, &pkt_node->faddr,
+	    sizeof(pkt_node->faddr));
+	key_offset += sizeof(pkt_node->faddr);
+	memcpy(key + key_offset, &pkt_node->fport,
+	    sizeof(pkt_node->fport));
 
 	counter_list = counter_hash +
 	    (hash32_buf(key, sizeof(key), 0) & siftr_hashmask);
@@ -462,16 +462,16 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		return; /* Should only happen if the ALQ is shutting down. */
 
 #ifdef SIFTR_IPV6
-	pkt_node->ip_laddr[3] = ntohl(pkt_node->ip_laddr[3]);
-	pkt_node->ip_faddr[3] = ntohl(pkt_node->ip_faddr[3]);
+	pkt_node->laddr[3] = ntohl(pkt_node->laddr[3]);
+	pkt_node->faddr[3] = ntohl(pkt_node->faddr[3]);
 
 	if (pkt_node->ipver == INP_IPV6) { /* IPv6 packet */
-		pkt_node->ip_laddr[0] = ntohl(pkt_node->ip_laddr[0]);
-		pkt_node->ip_laddr[1] = ntohl(pkt_node->ip_laddr[1]);
-		pkt_node->ip_laddr[2] = ntohl(pkt_node->ip_laddr[2]);
-		pkt_node->ip_faddr[0] = ntohl(pkt_node->ip_faddr[0]);
-		pkt_node->ip_faddr[1] = ntohl(pkt_node->ip_faddr[1]);
-		pkt_node->ip_faddr[2] = ntohl(pkt_node->ip_faddr[2]);
+		pkt_node->laddr[0] = ntohl(pkt_node->laddr[0]);
+		pkt_node->laddr[1] = ntohl(pkt_node->laddr[1]);
+		pkt_node->laddr[2] = ntohl(pkt_node->laddr[2]);
+		pkt_node->faddr[0] = ntohl(pkt_node->faddr[0]);
+		pkt_node->faddr[1] = ntohl(pkt_node->faddr[1]);
+		pkt_node->faddr[2] = ntohl(pkt_node->faddr[2]);
 
 		/* Construct an IPv6 log message. */
 		log_buf->ae_bytesused = snprintf(log_buf->ae_data,
@@ -483,24 +483,24 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		    pkt_node->hash,
 		    pkt_node->tval.tv_sec,
 		    pkt_node->tval.tv_usec,
-		    UPPER_SHORT(pkt_node->ip_laddr[0]),
-		    LOWER_SHORT(pkt_node->ip_laddr[0]),
-		    UPPER_SHORT(pkt_node->ip_laddr[1]),
-		    LOWER_SHORT(pkt_node->ip_laddr[1]),
-		    UPPER_SHORT(pkt_node->ip_laddr[2]),
-		    LOWER_SHORT(pkt_node->ip_laddr[2]),
-		    UPPER_SHORT(pkt_node->ip_laddr[3]),
-		    LOWER_SHORT(pkt_node->ip_laddr[3]),
-		    ntohs(pkt_node->tcp_localport),
-		    UPPER_SHORT(pkt_node->ip_faddr[0]),
-		    LOWER_SHORT(pkt_node->ip_faddr[0]),
-		    UPPER_SHORT(pkt_node->ip_faddr[1]),
-		    LOWER_SHORT(pkt_node->ip_faddr[1]),
-		    UPPER_SHORT(pkt_node->ip_faddr[2]),
-		    LOWER_SHORT(pkt_node->ip_faddr[2]),
-		    UPPER_SHORT(pkt_node->ip_faddr[3]),
-		    LOWER_SHORT(pkt_node->ip_faddr[3]),
-		    ntohs(pkt_node->tcp_foreignport),
+		    UPPER_SHORT(pkt_node->laddr[0]),
+		    LOWER_SHORT(pkt_node->laddr[0]),
+		    UPPER_SHORT(pkt_node->laddr[1]),
+		    LOWER_SHORT(pkt_node->laddr[1]),
+		    UPPER_SHORT(pkt_node->laddr[2]),
+		    LOWER_SHORT(pkt_node->laddr[2]),
+		    UPPER_SHORT(pkt_node->laddr[3]),
+		    LOWER_SHORT(pkt_node->laddr[3]),
+		    ntohs(pkt_node->lport),
+		    UPPER_SHORT(pkt_node->faddr[0]),
+		    LOWER_SHORT(pkt_node->faddr[0]),
+		    UPPER_SHORT(pkt_node->faddr[1]),
+		    LOWER_SHORT(pkt_node->faddr[1]),
+		    UPPER_SHORT(pkt_node->faddr[2]),
+		    LOWER_SHORT(pkt_node->faddr[2]),
+		    UPPER_SHORT(pkt_node->faddr[3]),
+		    LOWER_SHORT(pkt_node->faddr[3]),
+		    ntohs(pkt_node->fport),
 		    pkt_node->snd_ssthresh,
 		    pkt_node->snd_cwnd,
 		    pkt_node->snd_bwnd,
@@ -523,14 +523,14 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		    pkt_node->flowid,
 		    pkt_node->flowtype);
 	} else { /* IPv4 packet */
-		pkt_node->ip_laddr[0] = FIRST_OCTET(pkt_node->ip_laddr[3]);
-		pkt_node->ip_laddr[1] = SECOND_OCTET(pkt_node->ip_laddr[3]);
-		pkt_node->ip_laddr[2] = THIRD_OCTET(pkt_node->ip_laddr[3]);
-		pkt_node->ip_laddr[3] = FOURTH_OCTET(pkt_node->ip_laddr[3]);
-		pkt_node->ip_faddr[0] = FIRST_OCTET(pkt_node->ip_faddr[3]);
-		pkt_node->ip_faddr[1] = SECOND_OCTET(pkt_node->ip_faddr[3]);
-		pkt_node->ip_faddr[2] = THIRD_OCTET(pkt_node->ip_faddr[3]);
-		pkt_node->ip_faddr[3] = FOURTH_OCTET(pkt_node->ip_faddr[3]);
+		pkt_node->laddr[0] = FIRST_OCTET(pkt_node->laddr[3]);
+		pkt_node->laddr[1] = SECOND_OCTET(pkt_node->laddr[3]);
+		pkt_node->laddr[2] = THIRD_OCTET(pkt_node->laddr[3]);
+		pkt_node->laddr[3] = FOURTH_OCTET(pkt_node->laddr[3]);
+		pkt_node->faddr[0] = FIRST_OCTET(pkt_node->faddr[3]);
+		pkt_node->faddr[1] = SECOND_OCTET(pkt_node->faddr[3]);
+		pkt_node->faddr[2] = THIRD_OCTET(pkt_node->faddr[3]);
+		pkt_node->faddr[3] = FOURTH_OCTET(pkt_node->faddr[3]);
 #endif /* SIFTR_IPV6 */
 
 		/* Construct an IPv4 log message. */
@@ -542,16 +542,16 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		    pkt_node->hash,
 		    (intmax_t)pkt_node->tval.tv_sec,
 		    pkt_node->tval.tv_usec,
-		    pkt_node->ip_laddr[0],
-		    pkt_node->ip_laddr[1],
-		    pkt_node->ip_laddr[2],
-		    pkt_node->ip_laddr[3],
-		    ntohs(pkt_node->tcp_localport),
-		    pkt_node->ip_faddr[0],
-		    pkt_node->ip_faddr[1],
-		    pkt_node->ip_faddr[2],
-		    pkt_node->ip_faddr[3],
-		    ntohs(pkt_node->tcp_foreignport),
+		    pkt_node->laddr[0],
+		    pkt_node->laddr[1],
+		    pkt_node->laddr[2],
+		    pkt_node->laddr[3],
+		    ntohs(pkt_node->lport),
+		    pkt_node->faddr[0],
+		    pkt_node->faddr[1],
+		    pkt_node->faddr[2],
+		    pkt_node->faddr[3],
+		    ntohs(pkt_node->fport),
 		    pkt_node->snd_ssthresh,
 		    pkt_node->snd_cwnd,
 		    pkt_node->snd_bwnd,
@@ -786,26 +786,26 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 {
 #ifdef SIFTR_IPV6
 	if (ipver == INP_IPV4) {
-		pn->ip_laddr[3] = inp->inp_laddr.s_addr;
-		pn->ip_faddr[3] = inp->inp_faddr.s_addr;
+		pn->laddr[3] = inp->inp_laddr.s_addr;
+		pn->faddr[3] = inp->inp_faddr.s_addr;
 #else
-		*((uint32_t *)pn->ip_laddr) = inp->inp_laddr.s_addr;
-		*((uint32_t *)pn->ip_faddr) = inp->inp_faddr.s_addr;
+		*((uint32_t *)pn->laddr) = inp->inp_laddr.s_addr;
+		*((uint32_t *)pn->faddr) = inp->inp_faddr.s_addr;
 #endif
 #ifdef SIFTR_IPV6
 	} else {
-		pn->ip_laddr[0] = inp->in6p_laddr.s6_addr32[0];
-		pn->ip_laddr[1] = inp->in6p_laddr.s6_addr32[1];
-		pn->ip_laddr[2] = inp->in6p_laddr.s6_addr32[2];
-		pn->ip_laddr[3] = inp->in6p_laddr.s6_addr32[3];
-		pn->ip_faddr[0] = inp->in6p_faddr.s6_addr32[0];
-		pn->ip_faddr[1] = inp->in6p_faddr.s6_addr32[1];
-		pn->ip_faddr[2] = inp->in6p_faddr.s6_addr32[2];
-		pn->ip_faddr[3] = inp->in6p_faddr.s6_addr32[3];
+		pn->laddr[0] = inp->in6p_laddr.s6_addr32[0];
+		pn->laddr[1] = inp->in6p_laddr.s6_addr32[1];
+		pn->laddr[2] = inp->in6p_laddr.s6_addr32[2];
+		pn->laddr[3] = inp->in6p_laddr.s6_addr32[3];
+		pn->faddr[0] = inp->in6p_faddr.s6_addr32[0];
+		pn->faddr[1] = inp->in6p_faddr.s6_addr32[1];
+		pn->faddr[2] = inp->in6p_faddr.s6_addr32[2];
+		pn->faddr[3] = inp->in6p_faddr.s6_addr32[3];
 	}
 #endif
-	pn->tcp_localport = inp->inp_lport;
-	pn->tcp_foreignport = inp->inp_fport;
+	pn->lport = inp->inp_lport;
+	pn->fport = inp->inp_fport;
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
 	pn->rcv_wnd = tp->rcv_wnd;
