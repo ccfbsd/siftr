@@ -1242,7 +1242,7 @@ siftr_manage_ops(uint8_t action)
 	if ((s = sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN)) == NULL)
 		return (-1);
 
-	if (action == SIFTR_ENABLE) {
+	if (action == SIFTR_ENABLE && siftr_pkt_manager_thr == NULL) {
 		/*
 		 * Create our alq
 		 * XXX: We should abort if alq_open fails!
@@ -1375,7 +1375,8 @@ siftr_manage_ops(uint8_t action)
 
 		alq_close(siftr_alq);
 		siftr_alq = NULL;
-	}
+	} else
+		error = EINVAL;
 
 	sbuf_delete(s);
 
@@ -1415,7 +1416,7 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 static void
 siftr_shutdown_handler(void *arg)
 {
-	if (1 == siftr_enabled) {
+	if (siftr_enabled == 1) {
 		siftr_manage_ops(SIFTR_DISABLE);
 	}
 }
