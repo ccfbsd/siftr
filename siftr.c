@@ -522,7 +522,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		    pkt_node->rcv_buf_cc,
 		    pkt_node->sent_inflight_bytes,
 		    pkt_node->t_segqlen,
-		    pkt_node->flowid,
+		    hash_node->key,
 		    pkt_node->flowtype);
 	} else { /* IPv4 packet */
 		pkt_node->laddr[0] = FIRST_OCTET(pkt_node->laddr[3]);
@@ -573,7 +573,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		    pkt_node->rcv_buf_cc,
 		    pkt_node->sent_inflight_bytes,
 		    pkt_node->t_segqlen,
-		    pkt_node->flowid,
+		    hash_node->key,
 		    pkt_node->flowtype);
 #ifdef SIFTR_IPV6
 	}
