@@ -239,7 +239,7 @@ struct flow_hash_node
 {
 	uint16_t counter;
 	u_long last_cwnd;
-	uint8_t key[FLOW_KEY_LEN];
+	uint32_t key;
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
@@ -342,7 +342,8 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	struct listhead *counter_list;
 	struct siftr_stats *ss;
 	struct ale *log_buf;
-	uint8_t key[FLOW_KEY_LEN];
+	uint32_t key;
+	uint8_t key_tmp[FLOW_KEY_LEN];
 	uint8_t found_match, key_offset;
 
 	hash_node = NULL;
@@ -355,21 +356,21 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	 * into our hash table. Our key consists of:
 	 * ipversion, localip, localport, foreignip, foreignport
 	 */
-	key[0] = pkt_node->ipver;
-	memcpy(key + key_offset, &pkt_node->laddr,
+	key_tmp[0] = pkt_node->ipver;
+	memcpy(key_tmp + key_offset, &pkt_node->laddr,
 	    sizeof(pkt_node->laddr));
 	key_offset += sizeof(pkt_node->laddr);
-	memcpy(key + key_offset, &pkt_node->lport,
+	memcpy(key_tmp + key_offset, &pkt_node->lport,
 	    sizeof(pkt_node->lport));
 	key_offset += sizeof(pkt_node->lport);
-	memcpy(key + key_offset, &pkt_node->faddr,
+	memcpy(key_tmp + key_offset, &pkt_node->faddr,
 	    sizeof(pkt_node->faddr));
 	key_offset += sizeof(pkt_node->faddr);
-	memcpy(key + key_offset, &pkt_node->fport,
+	memcpy(key_tmp + key_offset, &pkt_node->fport,
 	    sizeof(pkt_node->fport));
 
-	counter_list = counter_hash +
-	    (hash32_buf(key, sizeof(key), 0) & siftr_hashmask);
+	key = hash32_buf(key_tmp, sizeof(key_tmp), 0);
+	counter_list = counter_hash + (key & siftr_hashmask);
 
 	/*
 	 * If the list is not empty i.e. the hash index has
@@ -391,7 +392,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 			 * hash node that stores the counter for the flow
 			 * the pkt belongs to.
 			 */
-			if (memcmp(hash_node->key, key, sizeof(key)) == 0) {
+			if (hash_node->key == key) {
 				found_match = 1;
 				break;
 			}
@@ -407,7 +408,8 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		if (hash_node != NULL) {
 			/* Initialise our new hash node list entry. */
 			hash_node->counter = 0;
-			memcpy(hash_node->key, key, sizeof(key));
+			hash_node->last_cwnd = 0;
+			hash_node->key = key;
 			LIST_INSERT_HEAD(counter_list, hash_node, nodes);
 		} else {
 			/* Malloc failed. */
