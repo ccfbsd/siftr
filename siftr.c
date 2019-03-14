@@ -271,7 +271,7 @@ static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
 static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
 static unsigned int siftr_generate_hashes = 0;
-static unsigned int siftr_port_filter = 0;
+static uint16_t     siftr_port_filter = 0;
 static unsigned int siftr_cwnd_filter = 0;
 /* static unsigned int siftr_binary_log = 0; */
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr.log";
@@ -318,7 +318,7 @@ SYSCTL_UINT(_net_inet_siftr, OID_AUTO, genhashes, CTLFLAG_RW,
     &siftr_generate_hashes, 0,
     "enable packet hash generation");
 
-SYSCTL_UINT(_net_inet_siftr, OID_AUTO, port_filter, CTLFLAG_RW,
+SYSCTL_U16(_net_inet_siftr, OID_AUTO, port_filter, CTLFLAG_RW,
     &siftr_port_filter, 0,
     "enable packet filter on a TCP port");
 
@@ -937,8 +937,12 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		goto inp_unlock;
 	}
 
-	/* only pkts selected by the tcp port filter can be inserted into the pkt_queue */
-	if (siftr_port_filter && (siftr_port_filter != ntohs(inp->inp_lport)) &&
+	/*
+	 * Only pkts selected by the tcp port filter
+	 * can be inserted into the pkt_queue
+	 */
+	if ((siftr_port_filter != 0) && 
+	    (siftr_port_filter != ntohs(inp->inp_lport)) &&
 	    (siftr_port_filter != ntohs(inp->inp_fport))) {
 		goto inp_unlock;
 	}
@@ -1116,6 +1120,16 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		else
 			ss->nskip_out_tcpcb++;
 
+		goto inp_unlock6;
+	}
+
+	/*
+	 * Only pkts selected by the tcp port filter
+	 * can be inserted into the pkt_queue
+	 */
+	if ((siftr_port_filter != 0) && 
+	    (siftr_port_filter != ntohs(inp->inp_lport)) &&
+	    (siftr_port_filter != ntohs(inp->inp_fport))) {
 		goto inp_unlock6;
 	}
 
