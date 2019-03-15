@@ -883,6 +883,24 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		goto ret;
 
 	/*
+	 * Create a tcphdr struct starting at the correct offset
+	 * in the IP packet. ip->ip_hl gives the ip header length
+	 * in 4-byte words, so multiply it to get the size in bytes.
+	 */
+	ip_hl = (ip->ip_hl << 2);
+	th = (struct tcphdr *)((caddr_t)ip + ip_hl);
+
+	/*
+	 * Only pkts selected by the tcp port filter
+	 * can be inserted into the pkt_queue
+	 */
+	if ((siftr_port_filter != 0) &&
+	    (siftr_port_filter != ntohs(th->th_sport)) &&
+	    (siftr_port_filter != ntohs(th->th_dport))) {
+		goto ret;
+	}
+
+	/*
 	 * If a kernel subsystem reinjects packets into the stack, our pfil
 	 * hook will be called multiple times for the same packet.
 	 * Make sure we only process unique packets.
@@ -894,14 +912,6 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		ss->n_in++;
 	else
 		ss->n_out++;
-
-	/*
-	 * Create a tcphdr struct starting at the correct offset
-	 * in the IP packet. ip->ip_hl gives the ip header length
-	 * in 4-byte words, so multiply it to get the size in bytes.
-	 */
-	ip_hl = (ip->ip_hl << 2);
-	th = (struct tcphdr *)((caddr_t)ip + ip_hl);
 
 	/*
 	 * If the pfil hooks don't provide a pointer to the
@@ -934,16 +944,6 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		else
 			ss->nskip_out_tcpcb++;
 
-		goto inp_unlock;
-	}
-
-	/*
-	 * Only pkts selected by the tcp port filter
-	 * can be inserted into the pkt_queue
-	 */
-	if ((siftr_port_filter != 0) && 
-	    (siftr_port_filter != ntohs(inp->inp_lport)) &&
-	    (siftr_port_filter != ntohs(inp->inp_fport))) {
 		goto inp_unlock;
 	}
 
@@ -1069,6 +1069,25 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	if (ip6->ip6_nxt != IPPROTO_TCP)
 		goto ret6;
 
+	ip6_hl = sizeof(struct ip6_hdr);
+
+	/*
+	 * Create a tcphdr struct starting at the correct offset
+	 * in the ipv6 packet. ip->ip_hl gives the ip header length
+	 * in 4-byte words, so multiply it to get the size in bytes.
+	 */
+	th = (struct tcphdr *)((caddr_t)ip6 + ip6_hl);
+
+	/*
+	 * Only pkts selected by the tcp port filter
+	 * can be inserted into the pkt_queue
+	 */
+	if ((siftr_port_filter != 0) &&
+	    (siftr_port_filter != ntohs(th->th_sport)) &&
+	    (siftr_port_filter != ntohs(th->th_dport))) {
+		goto ret;
+	}
+
 	/*
 	 * If a kernel subsystem reinjects packets into the stack, our pfil
 	 * hook will be called multiple times for the same packet.
@@ -1081,15 +1100,6 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		ss->n_in++;
 	else
 		ss->n_out++;
-
-	ip6_hl = sizeof(struct ip6_hdr);
-
-	/*
-	 * Create a tcphdr struct starting at the correct offset
-	 * in the ipv6 packet. ip->ip_hl gives the ip header length
-	 * in 4-byte words, so multiply it to get the size in bytes.
-	 */
-	th = (struct tcphdr *)((caddr_t)ip6 + ip6_hl);
 
 	/*
 	 * For inbound packets, the pfil hooks don't provide a pointer to the
@@ -1120,16 +1130,6 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 		else
 			ss->nskip_out_tcpcb++;
 
-		goto inp_unlock6;
-	}
-
-	/*
-	 * Only pkts selected by the tcp port filter
-	 * can be inserted into the pkt_queue
-	 */
-	if ((siftr_port_filter != 0) && 
-	    (siftr_port_filter != ntohs(inp->inp_lport)) &&
-	    (siftr_port_filter != ntohs(inp->inp_fport))) {
 		goto inp_unlock6;
 	}
 
