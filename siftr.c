@@ -1408,18 +1408,16 @@ siftr_manage_ops(uint8_t action)
 static int
 siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 {
-	int error;
-	uint32_t new;
+	uint32_t new  = siftr_enabled;
+	int error = sysctl_handle_int(oidp, &new, 0, req);
 
-	new = siftr_enabled;
-	error = sysctl_handle_int(oidp, &new, 0, req);
 	if (error == 0 && req->newptr != NULL) {
 		if (new > 1)
 			return (EINVAL);
 		else if (new != siftr_enabled) {
-			if ((error = siftr_manage_ops(new)) == 0) {
-				siftr_enabled = new;
-			} else {
+			siftr_enabled = new;
+			if ((error = siftr_manage_ops(new)) != 0) {
+				siftr_enabled = 0;
 				siftr_manage_ops(SIFTR_DISABLE);
 			}
 		}
