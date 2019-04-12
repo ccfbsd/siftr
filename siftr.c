@@ -272,7 +272,7 @@ DPCPU_DEFINE_STATIC(struct siftr_stats, ss);
 static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
 static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
-static unsigned int siftr_generate_hashes = 0;
+static bool siftr_generate_hashes = 0;
 static uint16_t     siftr_port_filter = 0;
 static bool siftr_cwnd_filter = 0;
 /* static unsigned int siftr_binary_log = 0; */
@@ -316,7 +316,7 @@ SYSCTL_UINT(_net_inet_siftr, OID_AUTO, ppl, CTLFLAG_RW,
     &siftr_pkts_per_log, 1,
     "number of packets between generating a log message");
 
-SYSCTL_UINT(_net_inet_siftr, OID_AUTO, genhashes, CTLFLAG_RW,
+SYSCTL_BOOL(_net_inet_siftr, OID_AUTO, genhashes, CTLFLAG_RW,
     &siftr_generate_hashes, 0,
     "enable packet hash generation");
 
