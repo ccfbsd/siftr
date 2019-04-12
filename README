@@ -5,3 +5,12 @@ Its original FreeBSD Manual Page can be found here:
 https://www.freebsd.org/cgi/man.cgi?query=siftr
 
 I add a Makefile for local compile, assuming your freebsd source tree is at /usr/src.
+
+defaults:
+sysctl net.inet.siftr
+net.inet.siftr.cwnd_filter: 0
+net.inet.siftr.port_filter: 0
+net.inet.siftr.genhashes: 0
+net.inet.siftr.ppl: 1
+net.inet.siftr.logfile: /var/log/siftr.log
+net.inet.siftr.enabled: 0
