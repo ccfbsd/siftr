@@ -274,7 +274,7 @@ static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
 static unsigned int siftr_generate_hashes = 0;
 static uint16_t     siftr_port_filter = 0;
-static unsigned int siftr_cwnd_filter = 0;
+static bool siftr_cwnd_filter = 0;
 /* static unsigned int siftr_binary_log = 0; */
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr.log";
@@ -324,7 +324,7 @@ SYSCTL_U16(_net_inet_siftr, OID_AUTO, port_filter, CTLFLAG_RW,
     &siftr_port_filter, 0,
     "enable packet filter on a TCP port");
 
-SYSCTL_UINT(_net_inet_siftr, OID_AUTO, cwnd_filter, CTLFLAG_RW,
+SYSCTL_BOOL(_net_inet_siftr, OID_AUTO, cwnd_filter, CTLFLAG_RW,
     &siftr_cwnd_filter, 0,
     "enable packet filter on TCP congestion window");
 
