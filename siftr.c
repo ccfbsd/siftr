@@ -434,6 +434,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 			}
 		} else {
 			hash_node->last_cwnd = pkt_node->snd_cwnd;
+			hash_node->counter = 0;
 		}
 	} else if ((siftr_pkts_per_log <= 1) && (siftr_cwnd_filter)) {
 		if (hash_node->last_cwnd == pkt_node->snd_cwnd) {
