@@ -270,7 +270,6 @@ struct siftr_stats
 DPCPU_DEFINE_STATIC(struct siftr_stats, ss);
 
 static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
-static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
 static bool siftr_generate_hashes = 0;
 static uint16_t     siftr_port_filter = 0;
@@ -304,8 +303,13 @@ SYSCTL_DECL(_net_inet_siftr);
 SYSCTL_NODE(_net_inet, OID_AUTO, siftr, CTLFLAG_RW, NULL,
     "siftr related settings");
 
-SYSCTL_PROC(_net_inet_siftr, OID_AUTO, enabled, CTLTYPE_UINT|CTLFLAG_RW,
-    &siftr_enabled, 0, &siftr_sysctl_enabled_handler, "IU",
+static volatile int siftr_enabled_cnt = 0;
+
+VNET_DEFINE_STATIC(uint32_t, siftr_enabled) = 0;
+#define	V_siftr_enabled		VNET(siftr_enabled)
+SYSCTL_PROC(_net_inet_siftr, OID_AUTO, enabled,
+    CTLFLAG_VNET|CTLTYPE_U32|CTLFLAG_RW, &VNET_NAME(siftr_enabled), 0,
+    &siftr_sysctl_enabled_handler, "IU",
     "switch siftr module operations on/off");
 
 SYSCTL_PROC(_net_inet_siftr, OID_AUTO, logfile, CTLTYPE_STRING|CTLFLAG_RW,
@@ -334,6 +338,17 @@ SYSCTL_UINT(_net_inet_siftr, OID_AUTO, binary, CTLFLAG_RW,
     "write log files in binary instead of ascii");
 */
 
+static void debugp(const char *func)
+{
+	static volatile uint32_t debug_index;
+	atomic_add_int(&debug_index, 1);
+	printf("[%u] td(%s:%p) func(%s): ref_cnt == %u, enabled == %u, mger_thr(%s:%p)\n",
+		atomic_load_acq_int(&debug_index),
+		curthread->td_name, curthread, func,
+		atomic_load_acq_int(&siftr_enabled_cnt),
+		atomic_load_acq_int(&V_siftr_enabled),
+		siftr_pkt_manager_thr->td_name, siftr_pkt_manager_thr);
+}
 
 /* Begin functions. */
 
@@ -1184,14 +1199,14 @@ siftr_pfil(int action)
 		pfh_inet6 = pfil_head_get(PFIL_TYPE_AF, AF_INET6);
 #endif
 
-		if (action == HOOK) {
+		if (action == HOOK && V_siftr_enabled == 1) {
 			pfil_add_hook(siftr_chkpkt, NULL,
 			    PFIL_IN | PFIL_OUT | PFIL_WAITOK, pfh_inet);
 #ifdef SIFTR_IPV6
 			pfil_add_hook(siftr_chkpkt6, NULL,
 			    PFIL_IN | PFIL_OUT | PFIL_WAITOK, pfh_inet6);
 #endif
-		} else if (action == UNHOOK) {
+		} else if (action == UNHOOK && V_siftr_enabled == 0) {
 			pfil_remove_hook(siftr_chkpkt, NULL,
 			    PFIL_IN | PFIL_OUT | PFIL_WAITOK, pfh_inet);
 #ifdef SIFTR_IPV6
@@ -1206,6 +1221,23 @@ siftr_pfil(int action)
 	return (0);
 }
 
+static inline void reset_enabled_cnt(void)
+{
+	/* clear siftr_enabled_cnt */
+	atomic_store_rel_int(&siftr_enabled_cnt, 0);
+
+	VNET_ITERATOR_DECL(vnet_iter);
+	VNET_LIST_RLOCK();
+	VNET_FOREACH(vnet_iter) {
+		CURVNET_SET(vnet_iter);
+		KASSERT((V_siftr_enabled == 0 || V_siftr_enabled == 1),
+		("invalid value: %u", V_siftr_enabled));
+		atomic_add_int(&siftr_enabled_cnt, V_siftr_enabled);
+		debugp(__func__);
+		CURVNET_RESTORE();
+	}
+	VNET_LIST_RUNLOCK();
+}
 
 static int
 siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS)
@@ -1293,7 +1325,9 @@ siftr_manage_ops(uint8_t action)
 		sbuf_finish(s);
 		alq_writen(siftr_alq, sbuf_data(s), sbuf_len(s), ALQ_WAITOK);
 
-	} else if (action == SIFTR_DISABLE && siftr_pkt_manager_thr != NULL) {
+	} else if (action == SIFTR_ENABLE && siftr_pkt_manager_thr != NULL) {
+		siftr_pfil(HOOK);
+	} else if (action == SIFTR_DISABLE) {
 		/*
 		 * Remove the pfil hook functions. All threads currently in
 		 * the hook functions are allowed to exit before siftr_pfil()
@@ -1301,99 +1335,105 @@ siftr_manage_ops(uint8_t action)
 		 */
 		siftr_pfil(UNHOOK);
 
-		/* This will block until the pkt manager thread unlocks it. */
-		mtx_lock(&siftr_pkt_mgr_mtx);
+		reset_enabled_cnt();
 
-		/* Tell the pkt manager thread that it should exit now. */
-		siftr_exit_pkt_manager_thread = 1;
+		/* only the last disable can remove siftr_pkt_manager_thr */
+		if (siftr_pkt_manager_thr != NULL &&
+		    atomic_load_acq_int(&siftr_enabled_cnt) == 0) {
+			/* This will block until the pkt manager thread unlocks it. */
+			mtx_lock(&siftr_pkt_mgr_mtx);
 
-		/*
-		 * Wake the pkt_manager thread so it realises that
-		 * siftr_exit_pkt_manager_thread == 1 and exits gracefully.
-		 * The wakeup won't be delivered until we unlock
-		 * siftr_pkt_mgr_mtx so this isn't racy.
-		 */
-		wakeup(&wait_for_pkt);
+			/* Tell the pkt manager thread that it should exit now. */
+			siftr_exit_pkt_manager_thread = 1;
 
-		/* Wait for the pkt_manager thread to exit. */
-		mtx_sleep(siftr_pkt_manager_thr, &siftr_pkt_mgr_mtx, PWAIT,
-		    "thrwait", 0);
+			/*
+			 * Wake the pkt_manager thread so it realises that
+			 * siftr_exit_pkt_manager_thread == 1 and exits gracefully.
+			 * The wakeup won't be delivered until we unlock
+			 * siftr_pkt_mgr_mtx so this isn't racy.
+			 */
+			wakeup(&wait_for_pkt);
 
-		siftr_pkt_manager_thr = NULL;
-		mtx_unlock(&siftr_pkt_mgr_mtx);
+			/* Wait for the pkt_manager thread to exit. */
+			mtx_sleep(siftr_pkt_manager_thr, &siftr_pkt_mgr_mtx, PWAIT,
+			    "thrwait", 0);
 
-		totalss.n_in = DPCPU_VARSUM(ss, n_in);
-		totalss.n_out = DPCPU_VARSUM(ss, n_out);
-		totalss.nskip_in_malloc = DPCPU_VARSUM(ss, nskip_in_malloc);
-		totalss.nskip_out_malloc = DPCPU_VARSUM(ss, nskip_out_malloc);
-		totalss.nskip_in_mtx = DPCPU_VARSUM(ss, nskip_in_mtx);
-		totalss.nskip_out_mtx = DPCPU_VARSUM(ss, nskip_out_mtx);
-		totalss.nskip_in_tcpcb = DPCPU_VARSUM(ss, nskip_in_tcpcb);
-		totalss.nskip_out_tcpcb = DPCPU_VARSUM(ss, nskip_out_tcpcb);
-		totalss.nskip_in_inpcb = DPCPU_VARSUM(ss, nskip_in_inpcb);
-		totalss.nskip_out_inpcb = DPCPU_VARSUM(ss, nskip_out_inpcb);
+			siftr_pkt_manager_thr = NULL;
+			mtx_unlock(&siftr_pkt_mgr_mtx);
 
-		total_skipped_pkts = totalss.nskip_in_malloc +
-		    totalss.nskip_out_malloc + totalss.nskip_in_mtx +
-		    totalss.nskip_out_mtx + totalss.nskip_in_tcpcb +
-		    totalss.nskip_out_tcpcb + totalss.nskip_in_inpcb +
-		    totalss.nskip_out_inpcb;
+			totalss.n_in = DPCPU_VARSUM(ss, n_in);
+			totalss.n_out = DPCPU_VARSUM(ss, n_out);
+			totalss.nskip_in_malloc = DPCPU_VARSUM(ss, nskip_in_malloc);
+			totalss.nskip_out_malloc = DPCPU_VARSUM(ss, nskip_out_malloc);
+			totalss.nskip_in_mtx = DPCPU_VARSUM(ss, nskip_in_mtx);
+			totalss.nskip_out_mtx = DPCPU_VARSUM(ss, nskip_out_mtx);
+			totalss.nskip_in_tcpcb = DPCPU_VARSUM(ss, nskip_in_tcpcb);
+			totalss.nskip_out_tcpcb = DPCPU_VARSUM(ss, nskip_out_tcpcb);
+			totalss.nskip_in_inpcb = DPCPU_VARSUM(ss, nskip_in_inpcb);
+			totalss.nskip_out_inpcb = DPCPU_VARSUM(ss, nskip_out_inpcb);
 
-		microtime(&tval);
+			total_skipped_pkts = totalss.nskip_in_malloc +
+			    totalss.nskip_out_malloc + totalss.nskip_in_mtx +
+			    totalss.nskip_out_mtx + totalss.nskip_in_tcpcb +
+			    totalss.nskip_out_tcpcb + totalss.nskip_in_inpcb +
+			    totalss.nskip_out_inpcb;
 
-		sbuf_printf(s,
-		    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
-		    "num_inbound_tcp_pkts=%ju\tnum_outbound_tcp_pkts=%ju\t"
-		    "total_tcp_pkts=%ju\tnum_inbound_skipped_pkts_malloc=%u\t"
-		    "num_outbound_skipped_pkts_malloc=%u\t"
-		    "num_inbound_skipped_pkts_mtx=%u\t"
-		    "num_outbound_skipped_pkts_mtx=%u\t"
-		    "num_inbound_skipped_pkts_tcpcb=%u\t"
-		    "num_outbound_skipped_pkts_tcpcb=%u\t"
-		    "num_inbound_skipped_pkts_inpcb=%u\t"
-		    "num_outbound_skipped_pkts_inpcb=%u\t"
-		    "total_skipped_tcp_pkts=%u",
-		    (intmax_t)tval.tv_sec,
-		    tval.tv_usec,
-		    (uintmax_t)totalss.n_in,
-		    (uintmax_t)totalss.n_out,
-		    (uintmax_t)(totalss.n_in + totalss.n_out),
-		    totalss.nskip_in_malloc,
-		    totalss.nskip_out_malloc,
-		    totalss.nskip_in_mtx,
-		    totalss.nskip_out_mtx,
-		    totalss.nskip_in_tcpcb,
-		    totalss.nskip_out_tcpcb,
-		    totalss.nskip_in_inpcb,
-		    totalss.nskip_out_inpcb,
-		    total_skipped_pkts);
+			microtime(&tval);
 
-		/*
-		 * Iterate over the flow hash, printing a summary of each
-		 * flow seen and freeing any malloc'd memory.
-		 * The hash consists of an array of LISTs (man 3 queue).
-		 */
-		for (i = 0; i <= siftr_hashmask; i++) {
-			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
-			    tmp_counter) {
-				free(counter, M_SIFTR_HASHNODE);
+			sbuf_printf(s,
+			    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
+			    "num_inbound_tcp_pkts=%ju\tnum_outbound_tcp_pkts=%ju\t"
+			    "total_tcp_pkts=%ju\tnum_inbound_skipped_pkts_malloc=%u\t"
+			    "num_outbound_skipped_pkts_malloc=%u\t"
+			    "num_inbound_skipped_pkts_mtx=%u\t"
+			    "num_outbound_skipped_pkts_mtx=%u\t"
+			    "num_inbound_skipped_pkts_tcpcb=%u\t"
+			    "num_outbound_skipped_pkts_tcpcb=%u\t"
+			    "num_inbound_skipped_pkts_inpcb=%u\t"
+			    "num_outbound_skipped_pkts_inpcb=%u\t"
+			    "total_skipped_tcp_pkts=%u",
+			    (intmax_t)tval.tv_sec,
+			    tval.tv_usec,
+			    (uintmax_t)totalss.n_in,
+			    (uintmax_t)totalss.n_out,
+			    (uintmax_t)(totalss.n_in + totalss.n_out),
+			    totalss.nskip_in_malloc,
+			    totalss.nskip_out_malloc,
+			    totalss.nskip_in_mtx,
+			    totalss.nskip_out_mtx,
+			    totalss.nskip_in_tcpcb,
+			    totalss.nskip_out_tcpcb,
+			    totalss.nskip_in_inpcb,
+			    totalss.nskip_out_inpcb,
+			    total_skipped_pkts);
+
+			/*
+			 * Iterate over the flow hash, printing a summary of each
+			 * flow seen and freeing any malloc'd memory.
+			 * The hash consists of an array of LISTs (man 3 queue).
+			 */
+			for (i = 0; i <= siftr_hashmask; i++) {
+				LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
+				    tmp_counter) {
+					free(counter, M_SIFTR_HASHNODE);
+				}
+
+				LIST_INIT(counter_hash + i);
 			}
 
-			LIST_INIT(counter_hash + i);
+			sbuf_printf(s, "\n");
+			sbuf_finish(s);
+
+			i = 0;
+			do {
+				bytes_to_write = min(SIFTR_ALQ_BUFLEN, sbuf_len(s)-i);
+				alq_writen(siftr_alq, sbuf_data(s)+i, bytes_to_write, ALQ_WAITOK);
+				i += bytes_to_write;
+			} while (i < sbuf_len(s));
+
+			alq_close(siftr_alq);
+			siftr_alq = NULL;
 		}
-
-		sbuf_printf(s, "\n");
-		sbuf_finish(s);
-
-		i = 0;
-		do {
-			bytes_to_write = min(SIFTR_ALQ_BUFLEN, sbuf_len(s)-i);
-			alq_writen(siftr_alq, sbuf_data(s)+i, bytes_to_write, ALQ_WAITOK);
-			i += bytes_to_write;
-		} while (i < sbuf_len(s));
-
-		alq_close(siftr_alq);
-		siftr_alq = NULL;
 	} else
 		error = EINVAL;
 
@@ -1411,16 +1451,16 @@ siftr_manage_ops(uint8_t action)
 static int
 siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 {
-	uint32_t new  = siftr_enabled;
+	uint32_t new  = V_siftr_enabled;
 	int error = sysctl_handle_int(oidp, &new, 0, req);
 
 	if (error == 0 && req->newptr != NULL) {
 		if (new > 1)
 			return (EINVAL);
-		else if (new != siftr_enabled) {
-			siftr_enabled = new;
+		else if (new != V_siftr_enabled) {
+			V_siftr_enabled = new;
 			if ((error = siftr_manage_ops(new)) != 0) {
-				siftr_enabled = 0;
+				V_siftr_enabled = 0;
 				siftr_manage_ops(SIFTR_DISABLE);
 			}
 		}
@@ -1433,9 +1473,17 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 static void
 siftr_shutdown_handler(void *arg)
 {
-	if (siftr_enabled == 1) {
-		siftr_manage_ops(SIFTR_DISABLE);
+	VNET_ITERATOR_DECL(vnet_iter);
+	VNET_LIST_RLOCK();
+	VNET_FOREACH(vnet_iter) {
+		CURVNET_SET(vnet_iter);
+		if (V_siftr_enabled == 1) {
+			V_siftr_enabled = 0;
+			siftr_manage_ops(SIFTR_DISABLE);
+		}
+		CURVNET_RESTORE();
 	}
+	VNET_LIST_RUNLOCK();
 }
 
 
@@ -1446,7 +1494,7 @@ static int
 deinit_siftr(void)
 {
 	/* Cleanup. */
-	siftr_manage_ops(SIFTR_DISABLE);
+	siftr_shutdown_handler(NULL);
 	hashdestroy(counter_hash, M_SIFTR, siftr_hashmask);
 	mtx_destroy(&siftr_pkt_queue_mtx);
 	mtx_destroy(&siftr_pkt_mgr_mtx);
