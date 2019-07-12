@@ -251,23 +251,21 @@ struct siftr_stats
 	uint64_t n_in;
 	uint64_t n_out;
 	/* # pkts skipped due to failed malloc calls. */
-	uint32_t nskip_in_malloc;
-	uint32_t nskip_out_malloc;
+	uint64_t nskip_in_malloc;
+	uint64_t nskip_out_malloc;
 	/* # pkts skipped due to failed mtx acquisition. */
-	uint32_t nskip_in_mtx;
-	uint32_t nskip_out_mtx;
+	uint64_t nskip_in_mtx;
+	uint64_t nskip_out_mtx;
 	/* # pkts skipped due to failed inpcb lookups. */
-	uint32_t nskip_in_inpcb;
-	uint32_t nskip_out_inpcb;
+	uint64_t nskip_in_inpcb;
+	uint64_t nskip_out_inpcb;
 	/* # pkts skipped due to failed tcpcb lookups. */
-	uint32_t nskip_in_tcpcb;
-	uint32_t nskip_out_tcpcb;
+	uint64_t nskip_in_tcpcb;
+	uint64_t nskip_out_tcpcb;
 	/* # pkts skipped due to stack reinjection. */
-	uint32_t nskip_in_dejavu;
-	uint32_t nskip_out_dejavu;
+	uint64_t nskip_in_dejavu;
+	uint64_t nskip_out_dejavu;
 };
-
-DPCPU_DEFINE_STATIC(struct siftr_stats, ss);
 
 static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
 static unsigned int siftr_pkts_per_log = 1;
@@ -302,6 +300,18 @@ SYSCTL_DECL(_net_inet_siftr);
 
 SYSCTL_NODE(_net_inet, OID_AUTO, siftr, CTLFLAG_RW, NULL,
     "siftr related settings");
+
+VNET_PCPUSTAT_DEFINE_STATIC(struct siftr_stats, siftr_stats);
+VNET_PCPUSTAT_SYSINIT(siftr_stats);
+#ifdef VIMAGE
+VNET_PCPUSTAT_SYSUNINIT(siftr_stats);
+#endif
+
+#define	SIFTRSTAT_ADD(name, val) \
+	VNET_PCPUSTAT_ADD(struct siftr_stats, siftr_stats, name, (val))
+#define	SIFTRSTAT_INC(name)	SIFTRSTAT_ADD(name, 1)
+#define	SIFTRSTAT_FETCH(name) \
+	VNET_PCPUSTAT_FETCH(struct siftr_stats, siftr_stats, name)
 
 static volatile int siftr_enabled_cnt = 0;
 
@@ -338,16 +348,16 @@ SYSCTL_UINT(_net_inet_siftr, OID_AUTO, binary, CTLFLAG_RW,
     "write log files in binary instead of ascii");
 */
 
-static void debugp(const char *func)
+static void debugp(const char *func, struct vnet * vnet_pt)
 {
 	static volatile uint32_t debug_index;
 	atomic_add_int(&debug_index, 1);
-	printf("[%u] td(%s:%p) func(%s): ref_cnt == %u, enabled == %u, mger_thr(%s:%p)\n",
+	printf("[%u] td(%s:%p) func(%s) mger_thr(%s:%p): vnet_pt == %p, ref_cnt == %u, enabled == %u\n",
 		atomic_load_acq_int(&debug_index),
 		curthread->td_name, curthread, func,
+		siftr_pkt_manager_thr->td_name, siftr_pkt_manager_thr, vnet_pt,
 		atomic_load_acq_int(&siftr_enabled_cnt),
-		atomic_load_acq_int(&V_siftr_enabled),
-		siftr_pkt_manager_thr->td_name, siftr_pkt_manager_thr);
+		atomic_load_acq_int(&V_siftr_enabled));
 }
 
 /* Begin functions. */
@@ -357,14 +367,12 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
-	struct siftr_stats *ss;
 	struct ale *log_buf;
 	uint32_t key;
 	uint8_t key_tmp[FLOW_KEY_LEN];
 	uint8_t found_match, key_offset;
 
 	hash_node = NULL;
-	ss = DPCPU_PTR(ss);
 	found_match = 0;
 	key_offset = 1;
 
@@ -431,9 +439,9 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		} else {
 			/* Malloc failed. */
 			if (pkt_node->direction == PFIL_IN)
-				ss->nskip_in_malloc++;
+				SIFTRSTAT_INC(nskip_in_malloc);
 			else
-				ss->nskip_out_malloc++;
+				SIFTRSTAT_INC(nskip_out_malloc);
 
 			return;
 		}
@@ -716,14 +724,14 @@ hash_pkt(struct mbuf *m, uint32_t offset)
  * Return value >0 means the caller should skip processing this mbuf.
  */
 static inline int
-siftr_chkreinject(struct mbuf *m, int dir, struct siftr_stats *ss)
+siftr_chkreinject(struct mbuf *m, int dir)
 {
 	if (m_tag_locate(m, PACKET_COOKIE_SIFTR, PACKET_TAG_SIFTR, NULL)
 	    != NULL) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_dejavu++;
+			SIFTRSTAT_INC(nskip_in_dejavu);
 		else
-			ss->nskip_out_dejavu++;
+			SIFTRSTAT_INC(nskip_out_dejavu);
 
 		return (1);
 	} else {
@@ -731,9 +739,9 @@ siftr_chkreinject(struct mbuf *m, int dir, struct siftr_stats *ss)
 		    PACKET_TAG_SIFTR, 0, M_NOWAIT);
 		if (tag == NULL) {
 			if (dir == PFIL_IN)
-				ss->nskip_in_malloc++;
+				SIFTRSTAT_INC(nskip_in_malloc);
 			else
-				ss->nskip_out_malloc++;
+				SIFTRSTAT_INC(nskip_out_malloc);
 
 			return (1);
 		}
@@ -751,7 +759,7 @@ siftr_chkreinject(struct mbuf *m, int dir, struct siftr_stats *ss)
  */
 static inline struct inpcb *
 siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
-    uint16_t dport, int dir, struct siftr_stats *ss)
+    uint16_t dport, int dir)
 {
 	struct inpcb *inp;
 
@@ -791,9 +799,9 @@ siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
 	/* If we can't find the inpcb, bail. */
 	if (inp == NULL) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_inpcb++;
+			SIFTRSTAT_INC(nskip_in_inpcb);
 		else
-			ss->nskip_out_inpcb++;
+			SIFTRSTAT_INC(nskip_out_inpcb);
 	}
 
 	return (inp);
@@ -882,12 +890,8 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
-	struct siftr_stats *ss;
 	unsigned int ip_hl;
-	int inp_locally_locked;
-
-	inp_locally_locked = 0;
-	ss = DPCPU_PTR(ss);
+	int inp_locally_locked = 0;
 
 	/*
 	 * m_pullup is not required here because ip_{input|output}
@@ -923,13 +927,13 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	 * hook will be called multiple times for the same packet.
 	 * Make sure we only process unique packets.
 	 */
-	if (siftr_chkreinject(*m, dir, ss))
+	if (siftr_chkreinject(*m, dir))
 		goto ret;
 
 	if (dir == PFIL_IN)
-		ss->n_in++;
+		SIFTRSTAT_INC(n_in);
 	else
-		ss->n_out++;
+		SIFTRSTAT_INC(n_out);
 
 	/*
 	 * If the pfil hooks don't provide a pointer to the
@@ -938,7 +942,7 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	if (!inp) {
 		/* Find the corresponding inpcb for this pkt. */
 		inp = siftr_findinpcb(INP_IPV4, ip, *m, th->th_sport,
-		    th->th_dport, dir, ss);
+		    th->th_dport, dir);
 
 		if (inp == NULL)
 			goto ret;
@@ -958,9 +962,9 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	 */
 	if (tp == NULL || inp->inp_flags & INP_TIMEWAIT) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_tcpcb++;
+			SIFTRSTAT_INC(nskip_in_tcpcb);
 		else
-			ss->nskip_out_tcpcb++;
+			SIFTRSTAT_INC(nskip_out_tcpcb);
 
 		goto inp_unlock;
 	}
@@ -969,9 +973,9 @@ siftr_chkpkt(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 
 	if (pn == NULL) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_malloc++;
+			SIFTRSTAT_INC(nskip_in_malloc);
 		else
-			ss->nskip_out_malloc++;
+			SIFTRSTAT_INC(nskip_out_malloc);
 
 		goto inp_unlock;
 	}
@@ -1064,12 +1068,8 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	struct ip6_hdr *ip6;
 	struct tcphdr *th;
 	struct tcpcb *tp;
-	struct siftr_stats *ss;
 	unsigned int ip6_hl;
-	int inp_locally_locked;
-
-	inp_locally_locked = 0;
-	ss = DPCPU_PTR(ss);
+	int inp_locally_locked = 0;
 
 	/*
 	 * m_pullup is not required here because ip6_{input|output}
@@ -1111,13 +1111,13 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	 * hook will be called multiple times for the same packet.
 	 * Make sure we only process unique packets.
 	 */
-	if (siftr_chkreinject(*m, dir, ss))
+	if (siftr_chkreinject(*m, dir))
 		goto ret6;
 
 	if (dir == PFIL_IN)
-		ss->n_in++;
+		SIFTRSTAT_INC(n_in);
 	else
-		ss->n_out++;
+		SIFTRSTAT_INC(n_out);
 
 	/*
 	 * For inbound packets, the pfil hooks don't provide a pointer to the
@@ -1126,7 +1126,7 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	if (!inp) {
 		/* Find the corresponding inpcb for this pkt. */
 		inp = siftr_findinpcb(INP_IPV6, (struct ip *)ip6, *m,
-		    th->th_sport, th->th_dport, dir, ss);
+		    th->th_sport, th->th_dport, dir);
 
 		if (inp == NULL)
 			goto ret6;
@@ -1144,9 +1144,9 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 	 */
 	if (tp == NULL || inp->inp_flags & INP_TIMEWAIT) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_tcpcb++;
+			SIFTRSTAT_INC(nskip_in_tcpcb);
 		else
-			ss->nskip_out_tcpcb++;
+			SIFTRSTAT_INC(nskip_out_tcpcb);
 
 		goto inp_unlock6;
 	}
@@ -1155,9 +1155,9 @@ siftr_chkpkt6(void *arg, struct mbuf **m, struct ifnet *ifp, int dir,
 
 	if (pn == NULL) {
 		if (dir == PFIL_IN)
-			ss->nskip_in_malloc++;
+			SIFTRSTAT_INC(nskip_in_malloc);
 		else
-			ss->nskip_out_malloc++;
+			SIFTRSTAT_INC(nskip_out_malloc);
 
 		goto inp_unlock6;
 	}
@@ -1233,7 +1233,7 @@ static inline void reset_enabled_cnt(void)
 		KASSERT((V_siftr_enabled == 0 || V_siftr_enabled == 1),
 		("invalid value: %u", V_siftr_enabled));
 		atomic_add_int(&siftr_enabled_cnt, V_siftr_enabled);
-		debugp(__func__);
+		debugp(__func__, vnet_iter);
 		CURVNET_RESTORE();
 	}
 	VNET_LIST_RUNLOCK();
@@ -1280,14 +1280,15 @@ done:
 static int
 siftr_manage_ops(uint8_t action)
 {
-	struct siftr_stats totalss;
+	struct siftr_stats totalss = {0};
 	struct timeval tval;
 	struct flow_hash_node *counter, *tmp_counter;
 	struct sbuf *s;
 	int i, ret, error = 0;
-	uint32_t bytes_to_write, total_skipped_pkts = 0;
+	uint32_t bytes_to_write;
 	struct sbuf sb;
 	char buf[480];
+	uint64_t total_skipped_pkts = 0;
 
 	/* Init a fixed sbuf that initially holds 200 chars. */
 	if ((s = sbuf_new(&sb, buf, sizeof(buf), SBUF_FIXEDLEN)) == NULL)
@@ -1302,8 +1303,6 @@ siftr_manage_ops(uint8_t action)
 		    SIFTR_LOG_FILE_MODE, SIFTR_ALQ_BUFLEN, 0);
 
 		STAILQ_INIT(&pkt_queue);
-
-		DPCPU_ZERO(ss);
 
 		siftr_exit_pkt_manager_thread = 0;
 
@@ -1361,16 +1360,18 @@ siftr_manage_ops(uint8_t action)
 			siftr_pkt_manager_thr = NULL;
 			mtx_unlock(&siftr_pkt_mgr_mtx);
 
-			totalss.n_in = DPCPU_VARSUM(ss, n_in);
-			totalss.n_out = DPCPU_VARSUM(ss, n_out);
-			totalss.nskip_in_malloc = DPCPU_VARSUM(ss, nskip_in_malloc);
-			totalss.nskip_out_malloc = DPCPU_VARSUM(ss, nskip_out_malloc);
-			totalss.nskip_in_mtx = DPCPU_VARSUM(ss, nskip_in_mtx);
-			totalss.nskip_out_mtx = DPCPU_VARSUM(ss, nskip_out_mtx);
-			totalss.nskip_in_tcpcb = DPCPU_VARSUM(ss, nskip_in_tcpcb);
-			totalss.nskip_out_tcpcb = DPCPU_VARSUM(ss, nskip_out_tcpcb);
-			totalss.nskip_in_inpcb = DPCPU_VARSUM(ss, nskip_in_inpcb);
-			totalss.nskip_out_inpcb = DPCPU_VARSUM(ss, nskip_out_inpcb);
+			totalss.n_in = SIFTRSTAT_FETCH(n_in);
+			totalss.n_out = SIFTRSTAT_FETCH(n_out);
+			totalss.nskip_in_malloc = SIFTRSTAT_FETCH(nskip_in_malloc);
+			totalss.nskip_out_malloc = SIFTRSTAT_FETCH(nskip_out_malloc);
+			totalss.nskip_in_mtx = SIFTRSTAT_FETCH(nskip_in_mtx);
+			totalss.nskip_out_mtx = SIFTRSTAT_FETCH(nskip_out_mtx);
+			totalss.nskip_in_tcpcb = SIFTRSTAT_FETCH(nskip_in_tcpcb);
+			totalss.nskip_out_tcpcb = SIFTRSTAT_FETCH(nskip_out_tcpcb);
+			totalss.nskip_in_inpcb = SIFTRSTAT_FETCH(nskip_in_inpcb);
+			totalss.nskip_out_inpcb = SIFTRSTAT_FETCH(nskip_out_inpcb);
+			totalss.nskip_in_dejavu = SIFTRSTAT_FETCH(nskip_in_dejavu);
+			totalss.nskip_out_dejavu = SIFTRSTAT_FETCH(nskip_out_dejavu);
 
 			total_skipped_pkts = totalss.nskip_in_malloc +
 			    totalss.nskip_out_malloc + totalss.nskip_in_mtx +
@@ -1383,20 +1384,22 @@ siftr_manage_ops(uint8_t action)
 			sbuf_printf(s,
 			    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
 			    "num_inbound_tcp_pkts=%ju\tnum_outbound_tcp_pkts=%ju\t"
-			    "total_tcp_pkts=%ju\tnum_inbound_skipped_pkts_malloc=%u\t"
-			    "num_outbound_skipped_pkts_malloc=%u\t"
-			    "num_inbound_skipped_pkts_mtx=%u\t"
-			    "num_outbound_skipped_pkts_mtx=%u\t"
-			    "num_inbound_skipped_pkts_tcpcb=%u\t"
-			    "num_outbound_skipped_pkts_tcpcb=%u\t"
-			    "num_inbound_skipped_pkts_inpcb=%u\t"
-			    "num_outbound_skipped_pkts_inpcb=%u\t"
-			    "total_skipped_tcp_pkts=%u",
+			    "total_tcp_pkts=%ju\tnum_inbound_skipped_pkts_malloc=%ju\t"
+			    "num_outbound_skipped_pkts_malloc=%ju\t"
+			    "num_inbound_skipped_pkts_mtx=%ju\t"
+			    "num_outbound_skipped_pkts_mtx=%ju\t"
+			    "num_inbound_skipped_pkts_tcpcb=%ju\t"
+			    "num_outbound_skipped_pkts_tcpcb=%ju\t"
+			    "num_inbound_skipped_pkts_inpcb=%ju\t"
+			    "num_outbound_skipped_pkts_inpcb=%ju\t"
+			    "num_inbound_dup_pkts=%ju\t"
+			    "num_outbound_dup_pkts=%ju\t"
+			    "total_skipped_tcp_pkts=%ju",
 			    (intmax_t)tval.tv_sec,
 			    tval.tv_usec,
-			    (uintmax_t)totalss.n_in,
-			    (uintmax_t)totalss.n_out,
-			    (uintmax_t)(totalss.n_in + totalss.n_out),
+			    totalss.n_in,
+			    totalss.n_out,
+			    totalss.n_in + totalss.n_out,
 			    totalss.nskip_in_malloc,
 			    totalss.nskip_out_malloc,
 			    totalss.nskip_in_mtx,
@@ -1405,6 +1408,8 @@ siftr_manage_ops(uint8_t action)
 			    totalss.nskip_out_tcpcb,
 			    totalss.nskip_in_inpcb,
 			    totalss.nskip_out_inpcb,
+			    totalss.nskip_in_dejavu,
+			    totalss.nskip_out_dejavu,
 			    total_skipped_pkts);
 
 			/*
