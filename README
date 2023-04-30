@@ -10,7 +10,6 @@ defaults:
 sysctl net.inet.siftr
 net.inet.siftr.cwnd_filter: 0
 net.inet.siftr.port_filter: 0
-net.inet.siftr.genhashes: 0
 net.inet.siftr.ppl: 1
 net.inet.siftr.logfile: /var/log/siftr.log
 net.inet.siftr.enabled: 0
