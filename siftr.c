@@ -978,7 +978,7 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	/* Check if we have a variance of the cwnd to record. */
 	if (siftr_cwnd_filter && hash_node != NULL) {
 		if (hash_node->last_cwnd == tp->snd_cwnd) {
-			goto inp_unlock;
+			goto inp_unlock6;
 		} else {
 			hash_node->last_cwnd = tp->snd_cwnd;
 		}
