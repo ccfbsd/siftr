@@ -641,31 +641,25 @@ siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
 static inline uint32_t
 siftr_get_flowid(struct inpcb *inp, int ipver, uint32_t *phashtype)
 {
-	if (!inp->inp_flowid) {
+	if (inp->inp_flowid == 0) {
 #ifdef SIFTR_IPV6
-		if (ipver == INP_IPV4) {
-			return fib4_calc_packet_hash(inp->inp_laddr,
-						     inp->inp_faddr,
-						     inp->inp_lport,
-						     inp->inp_fport,
-						     IPPROTO_TCP,
-						     phashtype);
-		} else {
+		if (ipver == INP_IPV6) {
 			return fib6_calc_packet_hash(&inp->in6p_laddr,
 						     &inp->in6p_faddr,
 						     inp->inp_lport,
 						     inp->inp_fport,
 						     IPPROTO_TCP,
 						     phashtype);
-		}
-#else
-		return fib4_calc_packet_hash(inp->inp_laddr,
-					     inp->inp_faddr,
-					     inp->inp_lport,
-					     inp->inp_fport,
-					     IPPROTO_TCP,
-					     phashtype);
+		} else
 #endif
+		{
+			return fib4_calc_packet_hash(inp->inp_laddr,
+						     inp->inp_faddr,
+						     inp->inp_lport,
+						     inp->inp_fport,
+						     IPPROTO_TCP,
+						     phashtype);
+		}
 	} else {
 		*phashtype = inp->inp_flowtype;
 		return inp->inp_flowid;
