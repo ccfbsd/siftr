@@ -1,5 +1,5 @@
 /*-
- * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+ * SPDX-License-Identifier: BSD-2-Clause
  *
  * Copyright (c) 2007-2009
  * 	Swinburne University of Technology, Melbourne, Australia.
@@ -206,7 +206,7 @@ struct pkt_node {
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
 
-struct flow_constant_info
+struct flow_info
 {
 #ifdef SIFTR_IPV6
 	char	laddr[INET6_ADDRSTRLEN];	/* local IP address */
@@ -226,7 +226,7 @@ struct flow_hash_node
 	uint16_t counter;
 	uint32_t last_cwnd;
 	uint32_t total_records;
-	struct flow_constant_info const_info;
+	struct flow_info const_info;
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
@@ -343,13 +343,13 @@ siftr_find_flow(struct listhead *counter_list, uint32_t id)
 }
 
 static inline struct flow_hash_node *
-siftr_new_hash_node(struct flow_constant_info const_info, int dir,
+siftr_new_hash_node(struct flow_info info, int dir,
 		    struct siftr_stats *ss)
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
 
-	counter_list = counter_hash + (const_info.key & siftr_hashmask);
+	counter_list = counter_hash + (info.key & siftr_hashmask);
 	/* Create a new hash node to store the flow's constant info. */
 	hash_node = malloc(sizeof(struct flow_hash_node), M_SIFTR_HASHNODE,
 			   M_NOWAIT|M_ZERO);
@@ -357,7 +357,7 @@ siftr_new_hash_node(struct flow_constant_info const_info, int dir,
 	if (hash_node != NULL) {
 		/* Initialise our new hash node list entry. */
 		hash_node->counter = 0;
-		hash_node->const_info = const_info;
+		hash_node->const_info = info;
 		LIST_INSERT_HEAD(counter_list, hash_node, nodes);
 		return hash_node;
 	} else {
@@ -395,80 +395,39 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		return; /* Should only happen if the ALQ is shutting down. */
 
 	hash_node->total_records++;
-#ifdef SIFTR_IPV6
-	if (hash_node->const_info.ipver == INP_IPV6) { /* IPv6 packet */
-		/* Construct an IPv6 log message. */
-		log_buf->ae_bytesused = snprintf(log_buf->ae_data,
-		    MAX_LOG_MSG_LEN,
-		    "%c,%zd.%06ld,%s,%u,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-		    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-		    direction[pkt_node->direction],
-		    pkt_node->tval.tv_sec,
-		    pkt_node->tval.tv_usec,
-		    hash_node->const_info.laddr,
-		    hash_node->const_info.lport,
-		    hash_node->const_info.faddr,
-		    hash_node->const_info.fport,
-		    pkt_node->snd_ssthresh,
-		    pkt_node->snd_cwnd,
-		    pkt_node->t_flags2,
-		    pkt_node->snd_wnd,
-		    pkt_node->rcv_wnd,
-		    pkt_node->snd_scale,
-		    pkt_node->rcv_scale,
-		    pkt_node->conn_state,
-		    pkt_node->max_seg_size,
-		    pkt_node->srtt,
-		    pkt_node->sack_enabled,
-		    pkt_node->flags,
-		    pkt_node->rto,
-		    pkt_node->snd_buf_hiwater,
-		    pkt_node->snd_buf_cc,
-		    pkt_node->rcv_buf_hiwater,
-		    pkt_node->rcv_buf_cc,
-		    pkt_node->sent_inflight_bytes,
-		    pkt_node->t_segqlen,
-		    pkt_node->flowid,
-		    pkt_node->flowtype);
-	} else { /* IPv4 packet */
-#endif /* SIFTR_IPV6 */
 
-		/* Construct an IPv4 log message. */
-		log_buf->ae_bytesused = snprintf(log_buf->ae_data,
-		    MAX_LOG_MSG_LEN,
-		    "%c,%jd.%06ld,%s,%u,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-		    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
-		    direction[pkt_node->direction],
-		    (intmax_t)pkt_node->tval.tv_sec,
-		    pkt_node->tval.tv_usec,
-		    hash_node->const_info.laddr,
-		    hash_node->const_info.lport,
-		    hash_node->const_info.faddr,
-		    hash_node->const_info.fport,
-		    pkt_node->snd_ssthresh,
-		    pkt_node->snd_cwnd,
-		    pkt_node->t_flags2,
-		    pkt_node->snd_wnd,
-		    pkt_node->rcv_wnd,
-		    pkt_node->snd_scale,
-		    pkt_node->rcv_scale,
-		    pkt_node->conn_state,
-		    pkt_node->max_seg_size,
-		    pkt_node->srtt,
-		    pkt_node->sack_enabled,
-		    pkt_node->flags,
-		    pkt_node->rto,
-		    pkt_node->snd_buf_hiwater,
-		    pkt_node->snd_buf_cc,
-		    pkt_node->rcv_buf_hiwater,
-		    pkt_node->rcv_buf_cc,
-		    pkt_node->sent_inflight_bytes,
-		    pkt_node->t_segqlen,
-		    pkt_node->flowid,
-		    pkt_node->flowtype);
-#ifdef SIFTR_IPV6
-	}
-#endif
+	/* Construct a log message. */
+	log_buf->ae_bytesused = snprintf(log_buf->ae_data, MAX_LOG_MSG_LEN,
+	    "%c,%zd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%u,%u,%u,%u,%u,%u,%u,%u\n",
+	    direction[pkt_node->direction],
+	    pkt_node->tval.tv_sec,
+	    pkt_node->tval.tv_usec,
+	    hash_node->const_info.laddr,
+	    hash_node->const_info.lport,
+	    hash_node->const_info.faddr,
+	    hash_node->const_info.fport,
+	    pkt_node->snd_ssthresh,
+	    pkt_node->snd_cwnd,
+	    pkt_node->t_flags2,
+	    pkt_node->snd_wnd,
+	    pkt_node->rcv_wnd,
+	    pkt_node->snd_scale,
+	    pkt_node->rcv_scale,
+	    pkt_node->conn_state,
+	    pkt_node->max_seg_size,
+	    pkt_node->srtt,
+	    pkt_node->sack_enabled,
+	    pkt_node->flags,
+	    pkt_node->rto,
+	    pkt_node->snd_buf_hiwater,
+	    pkt_node->snd_buf_cc,
+	    pkt_node->rcv_buf_hiwater,
+	    pkt_node->rcv_buf_cc,
+	    pkt_node->sent_inflight_bytes,
+	    pkt_node->t_segqlen,
+	    pkt_node->flowid,
+	    pkt_node->flowtype);
 
 	alq_post_flags(siftr_alq, log_buf, 0);
 }
@@ -796,9 +755,11 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	/*
 	 * If we can't find the TCP control block (happens occasionaly for a
-	 * packet sent during the shutdown phase of a TCP connection), bail
+	 * packet sent during the shutdown phase of a TCP connection), or the
+	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
+	 * bail.
 	 */
-	if (tp == NULL) {
+	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
 		if (dir == PFIL_IN)
 			ss->nskip_in_tcpcb++;
 		else
@@ -822,16 +783,16 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	/* If this flow hasn't been seen before, we create a new entry. */
 	if (hash_node == NULL) {
-		struct flow_constant_info const_info;
+		struct flow_info info;
 
-		inet_ntoa_r(inp->inp_laddr, const_info.laddr);
-		inet_ntoa_r(inp->inp_faddr, const_info.faddr);
-		const_info.lport = ntohs(inp->inp_lport);
-		const_info.fport = ntohs(inp->inp_fport);
-		const_info.key = hash_id;
-		const_info.ipver = INP_IPV4;
+		inet_ntoa_r(inp->inp_laddr, info.laddr);
+		inet_ntoa_r(inp->inp_faddr, info.faddr);
+		info.lport = ntohs(inp->inp_lport);
+		info.fport = ntohs(inp->inp_fport);
+		info.key = hash_id;
+		info.ipver = INP_IPV4;
 
-		hash_node = siftr_new_hash_node(const_info, dir, ss);
+		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
 
 	if (hash_node == NULL) {
@@ -954,9 +915,11 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	/*
 	 * If we can't find the TCP control block (happens occasionaly for a
-	 * packet sent during the shutdown phase of a TCP connection), bail
+	 * packet sent during the shutdown phase of a TCP connection), or the
+	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
+	 * bail.
 	 */
-	if (tp == NULL) {
+	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
 		if (dir == PFIL_IN)
 			ss->nskip_in_tcpcb++;
 		else
@@ -980,16 +943,16 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	/* If this flow hasn't been seen before, we create a new entry. */
 	if (!hash_node) {
-		struct flow_constant_info const_info;
+		struct flow_info info;
 
-		ip6_sprintf(const_info.laddr, &inp->in6p_laddr);
-		ip6_sprintf(const_info.faddr, &inp->in6p_faddr);
-		const_info.lport = ntohs(inp->inp_lport);
-		const_info.fport = ntohs(inp->inp_fport);
-		const_info.key = hash_id;
-		const_info.ipver = INP_IPV6;
+		ip6_sprintf(info.laddr, &inp->in6p_laddr);
+		ip6_sprintf(info.faddr, &inp->in6p_faddr);
+		info.lport = ntohs(inp->inp_lport);
+		info.fport = ntohs(inp->inp_fport);
+		info.key = hash_id;
+		info.ipver = INP_IPV6;
 
-		hash_node = siftr_new_hash_node(const_info, dir, ss);
+		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
 
 	if (!hash_node) {
