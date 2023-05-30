@@ -225,7 +225,7 @@ struct flow_hash_node
 {
 	uint16_t counter;
 	uint32_t last_cwnd;
-	uint32_t total_records;
+	uint32_t nrecord;			/* num of records in the flow */
 	struct flow_info const_info;
 	LIST_ENTRY(flow_hash_node) nodes;
 };
@@ -391,7 +391,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	if (log_buf == NULL)
 		return; /* Should only happen if the ALQ is shutting down. */
 
-	hash_node->total_records++;
+	hash_node->nrecord++;
 
 	/* Construct a log message. */
 	log_buf->ae_bytesused = snprintf(log_buf->ae_data, MAX_LOG_MSG_LEN,
@@ -730,7 +730,26 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	/* Check if we have a variance of the cwnd to record. */
 	if (siftr_cwnd_filter && hash_node != NULL) {
 		if (hash_node->last_cwnd == tp->snd_cwnd) {
-			goto inp_unlock;
+			if (siftr_pkts_per_log > 1) {
+				/*
+				 * Taking the remainder of the counter divided
+				 * by the current value of siftr_pkts_per_log
+				 * and storing that in counter provides a neat
+				 * way to modulate the frequency of log
+				 * messages being written to the log file.
+				 */
+				hash_node->counter = (hash_node->counter + 1) %
+						     siftr_pkts_per_log;
+				/*
+				 * If we have not seen enough packets since the
+				 * last time we wrote a log message for this
+				 * connection, return.
+				 */
+				if (hash_node->counter > 0)
+					goto inp_unlock;
+			} else {
+				goto inp_unlock;
+			}
 		} else {
 			hash_node->last_cwnd = tp->snd_cwnd;
 		}
@@ -882,7 +901,26 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	/* Check if we have a variance of the cwnd to record. */
 	if (siftr_cwnd_filter && hash_node != NULL) {
 		if (hash_node->last_cwnd == tp->snd_cwnd) {
-			goto inp_unlock6;
+			if (siftr_pkts_per_log > 1) {
+				/*
+				 * Taking the remainder of the counter divided
+				 * by the current value of siftr_pkts_per_log
+				 * and storing that in counter provides a neat
+				 * way to modulate the frequency of log
+				 * messages being written to the log file.
+				 */
+				hash_node->counter = (hash_node->counter + 1) %
+						     siftr_pkts_per_log;
+				/*
+				 * If we have not seen enough packets since the
+				 * last time we wrote a log message for this
+				 * connection, return.
+				 */
+				if (hash_node->counter > 0)
+					goto inp_unlock6;
+			} else {
+				goto inp_unlock6;
+			}
 		} else {
 			hash_node->last_cwnd = tp->snd_cwnd;
 		}
@@ -1152,7 +1190,9 @@ siftr_manage_ops(uint8_t action)
 		for (i = 0; i <= siftr_hashmask; i++) {
 			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
 			    tmp_counter) {
-				sbuf_printf(s, "%u,", counter->const_info.key);
+				sbuf_printf(s, "%u(%u),",
+					    counter->const_info.key,
+					    counter->nrecord);
 				free(counter, M_SIFTR_HASHNODE);
 			}
 
