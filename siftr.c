@@ -398,10 +398,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 
 	/* Construct a log message. */
 	log_buf->ae_bytesused = snprintf(log_buf->ae_data, MAX_LOG_MSG_LEN,
-	    "%c,%zd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
-	    pkt_node->tval.tv_sec,
+	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
 	    hash_node->const_info.laddr,
 	    hash_node->const_info.lport,
@@ -975,8 +975,6 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	siftr_siftdata(pn, inp, tp, INP_IPV6, dir, inp_locally_locked);
 
-	/* XXX: Figure out how to generate hashes for IPv6 packets. */
-
 	mtx_lock(&siftr_pkt_queue_mtx);
 	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
 	mtx_unlock(&siftr_pkt_queue_mtx);
@@ -1058,7 +1056,7 @@ siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS)
 	    strncmp(siftr_logfile, arg1, arg2) == 0)
 		goto done;
 
-	/* Filname changed */
+	/* file name changed */
 	error = alq_open(&new_alq, arg1, curthread->td_ucred,
 	    SIFTR_LOG_FILE_MODE, SIFTR_ALQ_BUFLEN, 0);
 	if (error != 0)
