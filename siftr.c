@@ -244,9 +244,6 @@ struct siftr_stats
 	/* # pkts skipped due to failed tcpcb lookups. */
 	uint32_t nskip_in_tcpcb;
 	uint32_t nskip_out_tcpcb;
-	/* # pkts skipped due to stack reinjection. */
-	uint32_t nskip_in_dejavu;
-	uint32_t nskip_out_dejavu;
 };
 
 DPCPU_DEFINE_STATIC(struct siftr_stats, ss);
@@ -510,40 +507,6 @@ siftr_pkt_manager_thread(void *arg)
 }
 
 /*
- * Check if a given mbuf has the SIFTR mbuf tag. If it does, log the fact that
- * it's a reinjected packet and return. If it doesn't, tag the mbuf and return.
- * Return value >0 means the caller should skip processing this mbuf.
- */
-static inline int
-siftr_chkreinject(struct mbuf *m, int dir, struct siftr_stats *ss)
-{
-	if (m_tag_locate(m, PACKET_COOKIE_SIFTR, PACKET_TAG_SIFTR, NULL)
-	    != NULL) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_dejavu++;
-		else
-			ss->nskip_out_dejavu++;
-
-		return (1);
-	} else {
-		struct m_tag *tag = m_tag_alloc(PACKET_COOKIE_SIFTR,
-		    PACKET_TAG_SIFTR, 0, M_NOWAIT);
-		if (tag == NULL) {
-			if (dir == PFIL_IN)
-				ss->nskip_in_malloc++;
-			else
-				ss->nskip_out_malloc++;
-
-			return (1);
-		}
-
-		m_tag_prepend(m, tag);
-	}
-
-	return (0);
-}
-
-/*
  * Look up an inpcb for a packet. Return the inpcb pointer if found, or NULL
  * otherwise.
  */
@@ -720,14 +683,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto ret;
 	}
 
-	/*
-	 * If a kernel subsystem reinjects packets into the stack, our pfil
-	 * hook will be called multiple times for the same packet.
-	 * Make sure we only process unique packets.
-	 */
-	if (siftr_chkreinject(*m, dir, ss))
-		goto ret;
-
 	if (dir == PFIL_IN)
 		ss->n_in++;
 	else
@@ -881,14 +836,6 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	    (siftr_port_filter != ntohs(th->th_dport))) {
 		goto ret6;
 	}
-
-	/*
-	 * If a kernel subsystem reinjects packets into the stack, our pfil
-	 * hook will be called multiple times for the same packet.
-	 * Make sure we only process unique packets.
-	 */
-	if (siftr_chkreinject(*m, dir, ss))
-		goto ret6;
 
 	if (dir == PFIL_IN)
 		ss->n_in++;
