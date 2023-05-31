@@ -150,6 +150,8 @@ static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode",
     "SIFTR pkt_node struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr_hashnode",
     "SIFTR flow_hash_node struct");
+static MALLOC_DEFINE(M_SIFTR_SEARCHARRAY, "siftr_searcharray",
+    "SIFTR flow_search_array struct");
 
 /* Used as links in the pkt manager queue. */
 struct pkt_node {
@@ -230,6 +232,12 @@ struct flow_hash_node
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
+struct flow_search_array
+{
+	uint32_t key;			/* flowid of the connection */
+	uint32_t nrecord;		/* num of records in the flow */
+};
+
 struct siftr_stats
 {
 	/* # TCP pkts seen by the SIFTR PFIL hooks, including any skipped. */
@@ -255,6 +263,7 @@ static uint16_t     siftr_port_filter = 0;
 static bool siftr_cwnd_filter = 0;
 
 /* static unsigned int siftr_binary_log = 0; */
+static unsigned int global_flow_cnt = 0;
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr.log";
 static u_long siftr_hashmask;
@@ -356,6 +365,7 @@ siftr_new_hash_node(struct flow_info info, int dir,
 		hash_node->counter = 0;
 		hash_node->const_info = info;
 		LIST_INSERT_HEAD(counter_list, hash_node, nodes);
+		global_flow_cnt++;
 		return hash_node;
 	} else {
 		/* malloc failed */
@@ -1067,17 +1077,35 @@ done:
 }
 
 static int
+compare_nrecord(const void *_a, const void *_b)
+{
+	const struct flow_search_array *a, *b;
+
+	a = (const struct flow_search_array *)_a;
+	b = (const struct flow_search_array *)_b;
+
+	if (a->nrecord < b->nrecord)
+		return (-1);
+	else if (a->nrecord > b->nrecord)
+		return (1);
+
+	return (0);
+}
+
+static int
 siftr_manage_ops(uint8_t action)
 {
 	struct siftr_stats totalss;
 	struct timeval tval;
 	struct flow_hash_node *counter, *tmp_counter;
 	struct sbuf *s;
-	int i, error;
+	int i, j, error;
 	uint32_t bytes_to_write, total_skipped_pkts;
+	struct flow_search_array *arr;
 
 	error = 0;
 	total_skipped_pkts = 0;
+	arr = NULL;
 
 	/* Init an autosizing sbuf that initially holds 200 chars. */
 	if ((s = sbuf_new(NULL, NULL, 200, SBUF_AUTOEXTEND)) == NULL)
@@ -1096,6 +1124,7 @@ siftr_manage_ops(uint8_t action)
 		DPCPU_ZERO(ss);
 
 		siftr_exit_pkt_manager_thread = 0;
+		global_flow_cnt = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -1168,7 +1197,7 @@ siftr_manage_ops(uint8_t action)
 		    "num_outbound_skipped_pkts_tcpcb=%u\t"
 		    "num_inbound_skipped_pkts_inpcb=%u\t"
 		    "num_outbound_skipped_pkts_inpcb=%u\t"
-		    "total_skipped_tcp_pkts=%u\tflowid_list=",
+		    "total_skipped_tcp_pkts=%u\tglobal_flow_cnt=%u\t",
 		    (intmax_t)tval.tv_sec,
 		    tval.tv_usec,
 		    (uintmax_t)totalss.n_in,
@@ -1180,23 +1209,41 @@ siftr_manage_ops(uint8_t action)
 		    totalss.nskip_out_tcpcb,
 		    totalss.nskip_in_inpcb,
 		    totalss.nskip_out_inpcb,
-		    total_skipped_pkts);
+		    total_skipped_pkts,
+		    global_flow_cnt);
+
+		/* Create an array to store all flows' keys and records. */
+		arr = malloc(sizeof(struct flow_search_array) * global_flow_cnt,
+			     M_SIFTR_SEARCHARRAY, M_NOWAIT|M_ZERO);
 
 		/*
 		 * Iterate over the flow hash, printing a summary of each
 		 * flowid seen and freeing any malloc'd memory.
 		 * The hash consists of an array of LISTs (man 3 queue).
 		 */
-		for (i = 0; i <= siftr_hashmask; i++) {
+		for (i = 0, j = 0; i <= siftr_hashmask; i++) {
 			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
 			    tmp_counter) {
-				sbuf_printf(s, "%u(%u),",
-					    counter->const_info.key,
-					    counter->nrecord);
+				if (arr != NULL) {
+					arr[j].key = counter->const_info.key;
+					arr[j].nrecord = counter->nrecord;
+					j++;
+				}
 				free(counter, M_SIFTR_HASHNODE);
 			}
 
 			LIST_INIT(counter_hash + i);
+		}
+
+		if (j > global_flow_cnt) {
+			panic("%s: arr[%d] overflow", __func__, j);
+		}
+
+		/* sort into ascending ordered list by flow's nrecord */
+		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
+		sbuf_printf(s, "flowid_list=");
+		for (j = 0; j < global_flow_cnt; j++) {
+			sbuf_printf(s, "%u,", arr[j].key);
 		}
 
 		sbuf_printf(s, "\n");
@@ -1211,6 +1258,8 @@ siftr_manage_ops(uint8_t action)
 
 		alq_close(siftr_alq);
 		siftr_alq = NULL;
+		global_flow_cnt = 0;
+		free(arr, M_SIFTR_SEARCHARRAY);
 	} else
 		error = EINVAL;
 
