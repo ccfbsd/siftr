@@ -363,6 +363,7 @@ siftr_new_hash_node(struct flow_info info, int dir,
 	if (hash_node != NULL) {
 		/* Initialise our new hash node list entry. */
 		hash_node->counter = 0;
+		hash_node->last_cwnd = 0;
 		hash_node->const_info = info;
 		LIST_INSERT_HEAD(counter_list, hash_node, nodes);
 		global_flow_cnt++;
@@ -394,6 +395,36 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 
 	if (hash_node == NULL) {
 		return;
+	}
+
+	/* Check if we have a variance of the cwnd to record. */
+	if (siftr_cwnd_filter && hash_node != NULL) {
+		if (hash_node->last_cwnd == pkt_node->snd_cwnd) {
+			if (siftr_pkts_per_log > 1) {
+				/*
+				 * Taking the remainder of the counter divided
+				 * by the current value of siftr_pkts_per_log
+				 * and storing that in counter provides a neat
+				 * way to modulate the frequency of log
+				 * messages being written to the log file.
+				 */
+				hash_node->counter = (hash_node->counter + 1) %
+						     siftr_pkts_per_log;
+				/*
+				 * If we have not seen enough packets since the
+				 * last time we wrote a log message for this
+				 * connection, return.
+				 */
+				if (hash_node->counter > 0) {
+					return;
+				}
+			} else {
+				return;
+			}
+		} else {
+			hash_node->last_cwnd = pkt_node->snd_cwnd;
+			hash_node->counter = 0;
+		}
 	}
 
 	log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN, ALQ_WAITOK);
@@ -737,34 +768,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	counter_list = counter_hash + (hash_id & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, hash_id);
 
-	/* Check if we have a variance of the cwnd to record. */
-	if (siftr_cwnd_filter && hash_node != NULL) {
-		if (hash_node->last_cwnd == tp->snd_cwnd) {
-			if (siftr_pkts_per_log > 1) {
-				/*
-				 * Taking the remainder of the counter divided
-				 * by the current value of siftr_pkts_per_log
-				 * and storing that in counter provides a neat
-				 * way to modulate the frequency of log
-				 * messages being written to the log file.
-				 */
-				hash_node->counter = (hash_node->counter + 1) %
-						     siftr_pkts_per_log;
-				/*
-				 * If we have not seen enough packets since the
-				 * last time we wrote a log message for this
-				 * connection, return.
-				 */
-				if (hash_node->counter > 0)
-					goto inp_unlock;
-			} else {
-				goto inp_unlock;
-			}
-		} else {
-			hash_node->last_cwnd = tp->snd_cwnd;
-		}
-	}
-
 	/* If this flow hasn't been seen before, we create a new entry. */
 	if (hash_node == NULL) {
 		struct flow_info info;
@@ -907,34 +910,6 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	hash_id = siftr_get_flowid(inp, INP_IPV6, &hash_type);
 	counter_list = counter_hash + (hash_id & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, hash_id);
-
-	/* Check if we have a variance of the cwnd to record. */
-	if (siftr_cwnd_filter && hash_node != NULL) {
-		if (hash_node->last_cwnd == tp->snd_cwnd) {
-			if (siftr_pkts_per_log > 1) {
-				/*
-				 * Taking the remainder of the counter divided
-				 * by the current value of siftr_pkts_per_log
-				 * and storing that in counter provides a neat
-				 * way to modulate the frequency of log
-				 * messages being written to the log file.
-				 */
-				hash_node->counter = (hash_node->counter + 1) %
-						     siftr_pkts_per_log;
-				/*
-				 * If we have not seen enough packets since the
-				 * last time we wrote a log message for this
-				 * connection, return.
-				 */
-				if (hash_node->counter > 0)
-					goto inp_unlock6;
-			} else {
-				goto inp_unlock6;
-			}
-		} else {
-			hash_node->last_cwnd = tp->snd_cwnd;
-		}
-	}
 
 	/* If this flow hasn't been seen before, we create a new entry. */
 	if (!hash_node) {
