@@ -261,6 +261,12 @@ static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
 static uint16_t     siftr_port_filter = 0;
 static bool siftr_cwnd_filter = 0;
+static unsigned int tmp_qsize = 0;
+static uint64_t total_tmp_qsize = 0;
+static unsigned int tmp_q_usecnt = 0;
+static unsigned int max_tmp_qsize = 0;
+static unsigned int max_str_size = 0;
+static unsigned int alq_getn_fail_cnt = 0;
 
 /* static unsigned int siftr_binary_log = 0; */
 static unsigned int global_flow_cnt = 0;
@@ -429,8 +435,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 
 	log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN, ALQ_WAITOK);
 
-	if (log_buf == NULL)
+	if (log_buf == NULL) {
+		alq_getn_fail_cnt++;
 		return; /* Should only happen if the ALQ is shutting down. */
+	}
 
 	hash_node->nrecord++;
 
@@ -466,6 +474,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	    pkt_node->t_segqlen,
 	    pkt_node->flowid,
 	    pkt_node->flowtype);
+
+	if (max_str_size < log_buf->ae_bytesused) {
+		max_str_size = log_buf->ae_bytesused;
+	}
 
 	alq_post_flags(siftr_alq, log_buf, 0);
 }
@@ -512,17 +524,24 @@ siftr_pkt_manager_thread(void *arg)
 		 */
 		mtx_unlock(&siftr_pkt_mgr_mtx);
 
+		/* cui: find the tmp queue size */
+		tmp_qsize = 0;
 		/* Flush all pkt_nodes to the log file. */
 		STAILQ_FOREACH_SAFE(pkt_node, &tmp_pkt_queue, nodes,
 		    pkt_node_temp) {
 			siftr_process_pkt(pkt_node);
 			STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
 			free(pkt_node, M_SIFTR_PKTNODE);
+			tmp_qsize++;
 		}
 
 		KASSERT(STAILQ_EMPTY(&tmp_pkt_queue),
 		    ("SIFTR tmp_pkt_queue not empty after flush"));
-
+		tmp_q_usecnt++;
+		total_tmp_qsize += tmp_qsize;
+		if (max_tmp_qsize < tmp_qsize) {
+			max_tmp_qsize = tmp_qsize;
+		}
 		mtx_lock(&siftr_pkt_mgr_mtx);
 
 		/*
@@ -1099,7 +1118,7 @@ siftr_manage_ops(uint8_t action)
 		DPCPU_ZERO(ss);
 
 		siftr_exit_pkt_manager_thread = 0;
-		global_flow_cnt = 0;
+		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt = max_str_size = max_tmp_qsize = global_flow_cnt = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -1172,7 +1191,9 @@ siftr_manage_ops(uint8_t action)
 		    "num_outbound_skipped_pkts_tcpcb=%u\t"
 		    "num_inbound_skipped_pkts_inpcb=%u\t"
 		    "num_outbound_skipped_pkts_inpcb=%u\t"
-		    "total_skipped_tcp_pkts=%u\tglobal_flow_cnt=%u\t",
+		    "total_skipped_tcp_pkts=%u\tglobal_flow_cnt=%u\t"
+		    "max_tmp_qsize=%u\tavg_tmp_qsize=%ju\tmax_str_size=%u\t"
+		    "alq_getn_fail_cnt=%u\t",
 		    (intmax_t)tval.tv_sec,
 		    tval.tv_usec,
 		    (uintmax_t)totalss.n_in,
@@ -1185,7 +1206,9 @@ siftr_manage_ops(uint8_t action)
 		    totalss.nskip_in_inpcb,
 		    totalss.nskip_out_inpcb,
 		    total_skipped_pkts,
-		    global_flow_cnt);
+		    global_flow_cnt, max_tmp_qsize,
+		    (uintmax_t)(total_tmp_qsize / tmp_q_usecnt),
+		    max_str_size, alq_getn_fail_cnt);
 
 		/* Create an array to store all flows' keys and records. */
 		arr = malloc(sizeof(struct flow_search_array) * global_flow_cnt,
@@ -1233,7 +1256,7 @@ siftr_manage_ops(uint8_t action)
 
 		alq_close(siftr_alq);
 		siftr_alq = NULL;
-		global_flow_cnt = 0;
+		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt = max_str_size = max_tmp_qsize = global_flow_cnt = 0;
 		free(arr, M_SIFTR_SEARCHARRAY);
 	} else
 		error = EINVAL;
