@@ -204,6 +204,12 @@ struct pkt_node {
 	u_int			flowid;
 	/* Flow type for the connection. */
 	u_int			flowtype;
+	/* TCP sequence number */
+	tcp_seq			th_seq;
+	/* TCP acknowledgement number */
+	tcp_seq			th_ack;
+	/* the length of TCP segment payload in bytes */
+	uint32_t		data_sz;
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -445,7 +451,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	/* Construct a log message. */
 	log_buf->ae_bytesused = snprintf(log_buf->ae_data, MAX_LOG_MSG_LEN,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u,%u,%u,%u,%u,%u,%u\n",
+	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -473,7 +479,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	    pkt_node->sent_inflight_bytes,
 	    pkt_node->t_segqlen,
 	    pkt_node->flowid,
-	    pkt_node->flowtype);
+	    pkt_node->flowtype,
+	    pkt_node->th_seq,
+	    pkt_node->th_ack,
+	    pkt_node->data_sz);
 
 	if (max_str_size < log_buf->ae_bytesused) {
 		max_str_size = log_buf->ae_bytesused;
@@ -818,7 +827,9 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	pn->flowid = hash_id;
 	pn->flowtype = hash_type;
-//	pn->payload_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
+	pn->th_seq = ntohl(th->th_seq);
+	pn->th_ack = ntohl(th->th_ack);
+	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
 	siftr_siftdata(pn, inp, tp, INP_IPV4, dir, inp_locally_locked);
 
@@ -961,6 +972,9 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	pn->flowid = hash_id;
 	pn->flowtype = hash_type;
+	pn->th_seq = ntohl(th->th_seq);
+	pn->th_ack = ntohl(th->th_ack);
+	pn->data_sz = ntohs(ip6->ip6_plen) - (th->th_off << 2);
 
 	siftr_siftdata(pn, inp, tp, INP_IPV6, dir, inp_locally_locked);
 
