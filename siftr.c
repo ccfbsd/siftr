@@ -125,8 +125,6 @@ __FBSDID("$FreeBSD$");
 #define UNHOOK 1
 #define SIFTR_EXPECTED_MAX_TCP_FLOWS 65536
 #define SYS_NAME "FreeBSD"
-#define PACKET_TAG_SIFTR 100
-#define PACKET_COOKIE_SIFTR 21749576
 #define SIFTR_LOG_FILE_MODE 0644
 #define SIFTR_DISABLE 0
 #define SIFTR_ENABLE 1
@@ -1132,7 +1130,8 @@ siftr_manage_ops(uint8_t action)
 		DPCPU_ZERO(ss);
 
 		siftr_exit_pkt_manager_thread = 0;
-		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt = max_str_size = max_tmp_qsize = global_flow_cnt = 0;
+		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
+			max_str_size = max_tmp_qsize = global_flow_cnt = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -1270,7 +1269,8 @@ siftr_manage_ops(uint8_t action)
 
 		alq_close(siftr_alq);
 		siftr_alq = NULL;
-		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt = max_str_size = max_tmp_qsize = global_flow_cnt = 0;
+		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
+			max_str_size = max_tmp_qsize = global_flow_cnt = 0;
 		free(arr, M_SIFTR_SEARCHARRAY);
 	} else
 		error = EINVAL;
