@@ -389,12 +389,15 @@ siftr_new_hash_node(struct flow_info info, int dir,
 	}
 }
 
-static void
-siftr_process_pkt(struct pkt_node * pkt_node)
+static int
+siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
-	struct ale *log_buf;
+	int ret_sz;
+
+	if (buf == NULL)
+		return 0; /* Should only happen if the ALQ is shutting down. */
 
 	if (pkt_node->flowid == 0) {
 		panic("%s: flowid not available", __func__);
@@ -404,7 +407,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	hash_node = siftr_find_flow(counter_list, pkt_node->flowid);
 
 	if (hash_node == NULL) {
-		return;
+		return 0;
 	}
 
 	/* Check if we have a variance of the cwnd to record. */
@@ -426,10 +429,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 				 * connection, return.
 				 */
 				if (hash_node->counter > 0) {
-					return;
+					return 0;
 				}
 			} else {
-				return;
+				return 0;
 			}
 		} else {
 			hash_node->last_cwnd = pkt_node->snd_cwnd;
@@ -437,17 +440,10 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 		}
 	}
 
-	log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN, ALQ_WAITOK);
-
-	if (log_buf == NULL) {
-		alq_getn_fail_cnt++;
-		return; /* Should only happen if the ALQ is shutting down. */
-	}
-
 	hash_node->nrecord++;
 
 	/* Construct a log message. */
-	log_buf->ae_bytesused = snprintf(log_buf->ae_data, MAX_LOG_MSG_LEN,
+	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
@@ -482,11 +478,7 @@ siftr_process_pkt(struct pkt_node * pkt_node)
 	    pkt_node->th_ack,
 	    pkt_node->data_sz);
 
-	if (max_str_size < log_buf->ae_bytesused) {
-		max_str_size = log_buf->ae_bytesused;
-	}
-
-	alq_post_flags(siftr_alq, log_buf, 0);
+	return ret_sz;
 }
 
 static void
@@ -496,6 +488,9 @@ siftr_pkt_manager_thread(void *arg)
 	    STAILQ_HEAD_INITIALIZER(tmp_pkt_queue);
 	struct pkt_node *pkt_node, *pkt_node_temp;
 	uint8_t draining;
+	struct ale *log_buf;
+	int ret_sz, cnt;
+	char *bufp;
 
 	draining = 2;
 
@@ -533,17 +528,52 @@ siftr_pkt_manager_thread(void *arg)
 
 		/* cui: find the tmp queue size */
 		tmp_qsize = 0;
-		/* Flush all pkt_nodes to the log file. */
-		STAILQ_FOREACH_SAFE(pkt_node, &tmp_pkt_queue, nodes,
-		    pkt_node_temp) {
-			siftr_process_pkt(pkt_node);
-			STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
-			free(pkt_node, M_SIFTR_PKTNODE);
-			tmp_qsize++;
+try_again:
+		pkt_node = STAILQ_FIRST(&tmp_pkt_queue);
+		if (pkt_node != NULL) {
+			if (STAILQ_NEXT(pkt_node, nodes) != NULL) {
+				cnt = 3;
+			} else {
+				cnt = 1;
+			}
+
+			log_buf = alq_getn(siftr_alq, (max_str_size +
+					   (max_str_size >> 3)) * cnt,
+					   ALQ_WAITOK);
+			if (log_buf == NULL) {
+				/* Should only happen if the ALQ is shutting
+				 * down. */
+				alq_getn_fail_cnt++;
+				goto try_again;
+			}
+			/* not write yet */
+			log_buf->ae_bytesused = 0;
+			bufp = log_buf->ae_data;
+
+			STAILQ_FOREACH_SAFE(pkt_node, &tmp_pkt_queue, nodes,
+			    pkt_node_temp) {
+				tmp_qsize++;
+				ret_sz = siftr_process_pkt(pkt_node, bufp);
+				if (max_str_size < ret_sz) {
+					max_str_size = ret_sz;
+				}
+				bufp += ret_sz;
+				log_buf->ae_bytesused += ret_sz;
+				STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
+				free(pkt_node, M_SIFTR_PKTNODE);
+				cnt--;
+				if (cnt <= 0 && !STAILQ_EMPTY(&tmp_pkt_queue)) {
+					alq_post_flags(siftr_alq, log_buf, 0);
+					goto try_again;
+				}
+			}
+			alq_post_flags(siftr_alq, log_buf, 0);
 		}
 
-		KASSERT(STAILQ_EMPTY(&tmp_pkt_queue),
-		    ("SIFTR tmp_pkt_queue not empty after flush"));
+		if (!STAILQ_EMPTY(&tmp_pkt_queue)) {
+			panic("%s: SIFTR tmp_pkt_queue not empty after flush",
+			      __func__);
+		}
 		tmp_q_usecnt++;
 		total_tmp_qsize += tmp_qsize;
 		if (max_tmp_qsize < tmp_qsize) {
