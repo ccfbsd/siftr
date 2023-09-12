@@ -61,8 +61,6 @@
  ******************************************************/
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD$");
-
 #include <sys/param.h>
 #include <sys/alq.h>
 #include <sys/errno.h>
@@ -173,7 +171,7 @@ struct pkt_node {
 	/* Current state of the TCP FSM. */
 	uint8_t			conn_state;
 	/* Max Segment Size (bytes). */
-	u_int			max_seg_size;
+	uint32_t		mss;
 	/* Smoothed RTT (usecs). */
 	uint32_t		srtt;
 	/* Is SACK enabled? */
@@ -183,7 +181,7 @@ struct pkt_node {
 	/* Window scaling for recv window. */
 	u_char			rcv_scale;
 	/* TCP control block flags. */
-	u_int			flags;
+	u_int			t_flags;
 	/* Retransmission timeout (usec). */
 	uint32_t		rto;
 	/* Size of the TCP send buffer in bytes. */
@@ -396,9 +394,6 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	struct listhead *counter_list;
 	int ret_sz;
 
-	if (buf == NULL)
-		return 0; /* Should only happen if the ALQ is shutting down. */
-
 	if (pkt_node->flowid == 0) {
 		panic("%s: flowid not available", __func__);
 	}
@@ -443,7 +438,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	hash_node->nrecord++;
 
 	/* Construct a log message. */
-	ret_sz = sprintf(buf,
+	ret_sz = snprintf(buf, MAX_LOG_MSG_LEN,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
@@ -461,10 +456,10 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->snd_scale,
 	    pkt_node->rcv_scale,
 	    pkt_node->conn_state,
-	    pkt_node->max_seg_size,
+	    pkt_node->mss,
 	    pkt_node->srtt,
 	    pkt_node->sack_enabled,
-	    pkt_node->flags,
+	    pkt_node->t_flags,
 	    pkt_node->rto,
 	    pkt_node->snd_buf_hiwater,
 	    pkt_node->snd_buf_cc,
@@ -537,37 +532,47 @@ try_again:
 				cnt = 1;
 			}
 
-			log_buf = alq_getn(siftr_alq, (max_str_size +
-					   (max_str_size >> 3)) * cnt,
+			log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN * cnt,
 					   ALQ_WAITOK);
-			if (log_buf == NULL) {
-				/* Should only happen if the ALQ is shutting
-				 * down. */
+ 
+			if (log_buf != NULL) {
+				log_buf->ae_bytesused = 0;
+				bufp = log_buf->ae_data;
+			} else {
+				/*
+				 * Should only happen if the ALQ is shutting
+				 * down.
+				 */
 				alq_getn_fail_cnt++;
-				goto try_again;
+				bufp = NULL;
 			}
-			/* not write yet */
-			log_buf->ae_bytesused = 0;
-			bufp = log_buf->ae_data;
 
 			STAILQ_FOREACH_SAFE(pkt_node, &tmp_pkt_queue, nodes,
 			    pkt_node_temp) {
 				tmp_qsize++;
-				ret_sz = siftr_process_pkt(pkt_node, bufp);
-				if (max_str_size < ret_sz) {
-					max_str_size = ret_sz;
+				if (log_buf != NULL) {
+					ret_sz = siftr_process_pkt(pkt_node,
+								   bufp);
+					if (max_str_size < ret_sz) {
+						max_str_size = ret_sz;
+					}
+
+					bufp += ret_sz;
+					log_buf->ae_bytesused += ret_sz;
+					cnt--;
 				}
-				bufp += ret_sz;
-				log_buf->ae_bytesused += ret_sz;
+
 				STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
 				free(pkt_node, M_SIFTR_PKTNODE);
-				cnt--;
+
 				if (cnt <= 0 && !STAILQ_EMPTY(&tmp_pkt_queue)) {
 					alq_post_flags(siftr_alq, log_buf, 0);
 					goto try_again;
 				}
 			}
-			alq_post_flags(siftr_alq, log_buf, 0);
+			if (log_buf != NULL) {
+				alq_post_flags(siftr_alq, log_buf, 0);
+			}
 		}
 
 		if (!STAILQ_EMPTY(&tmp_pkt_queue)) {
@@ -697,10 +702,10 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->snd_scale = tp->snd_scale;
 	pn->rcv_scale = tp->rcv_scale;
 	pn->conn_state = tp->t_state;
-	pn->max_seg_size = tp->t_maxseg;
+	pn->mss = tp->t_maxseg;
 	pn->srtt = ((uint64_t)tp->t_srtt * tick) >> TCP_RTT_SHIFT;
 	pn->sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
-	pn->flags = tp->t_flags;
+	pn->t_flags = tp->t_flags;
 	pn->rto = tp->t_rxtcur * tick;
 	pn->snd_buf_hiwater = inp->inp_socket->so_snd.sb_hiwat;
 	pn->snd_buf_cc = sbused(&inp->inp_socket->so_snd);
@@ -721,7 +726,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	 * maximum pps throughput processing when SIFTR is loaded and enabled.
 	 */
 	microtime(&pn->tval);
-	TCP_PROBE1(siftr, &pn);
+	TCP_PROBE1(siftr, pn);
 }
 
 /*
