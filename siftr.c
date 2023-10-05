@@ -438,7 +438,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	hash_node->nrecord++;
 
 	/* Construct a log message. */
-	ret_sz = snprintf(buf, MAX_LOG_MSG_LEN,
+	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
@@ -472,6 +472,11 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
 	    pkt_node->data_sz);
+
+	if (ret_sz > MAX_LOG_MSG_LEN) {
+		panic("%s: traffic record size %d larger than max record size %d",
+		      __func__, ret_sz, MAX_LOG_MSG_LEN);
+	}
 
 	return ret_sz;
 }
