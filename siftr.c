@@ -473,9 +473,13 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->th_ack,
 	    pkt_node->data_sz);
 
-	if (ret_sz > MAX_LOG_MSG_LEN) {
+	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: traffic record size %d larger than max record size %d",
 		      __func__, ret_sz, MAX_LOG_MSG_LEN);
+	}
+	if (ret_sz < 0) {
+		panic("%s: an encoding error occurred, return value %d",
+		      __func__, ret_sz);
 	}
 
 	return ret_sz;
