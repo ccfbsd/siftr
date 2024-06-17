@@ -60,7 +60,6 @@
  * Most recent update: September 2010
  ******************************************************/
 
-#include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/alq.h>
 #include <sys/errno.h>
@@ -74,6 +73,7 @@
 #include <sys/mutex.h>
 #include <sys/pcpu.h>
 #include <sys/proc.h>
+#include <sys/reboot.h>
 #include <sys/sbuf.h>
 #include <sys/sdt.h>
 #include <sys/smp.h>
@@ -132,6 +132,7 @@
  * data fields such that the line length could exceed the below value.
  */
 #define MAX_LOG_MSG_LEN 300
+#define MAX_LOG_BATCH_SIZE 3
 /* XXX: Make this a sysctl tunable. */
 #define SIFTR_ALQ_BUFLEN (1000*MAX_LOG_MSG_LEN)
 
@@ -437,7 +438,8 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 
 	hash_node->nrecord++;
 
-	/* Construct a log message. */
+	/* Construct a log message.
+	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
@@ -490,10 +492,10 @@ siftr_pkt_manager_thread(void *arg)
 {
 	STAILQ_HEAD(pkthead, pkt_node) tmp_pkt_queue =
 	    STAILQ_HEAD_INITIALIZER(tmp_pkt_queue);
-	struct pkt_node *pkt_node, *pkt_node_temp;
+	struct pkt_node *pkt_node;
 	uint8_t draining;
 	struct ale *log_buf;
-	int ret_sz, cnt;
+	int ret_sz, cnt = 0;
 	char *bufp;
 
 	draining = 2;
@@ -532,16 +534,11 @@ siftr_pkt_manager_thread(void *arg)
 
 		/* cui: find the tmp queue size */
 		tmp_qsize = 0;
-try_again:
-		pkt_node = STAILQ_FIRST(&tmp_pkt_queue);
-		if (pkt_node != NULL) {
-			if (STAILQ_NEXT(pkt_node, nodes) != NULL) {
-				cnt = 3;
-			} else {
-				cnt = 1;
-			}
 
-			log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN * cnt,
+		while ((pkt_node = STAILQ_FIRST(&tmp_pkt_queue)) != NULL) {
+			log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN *
+						((STAILQ_NEXT(pkt_node, nodes) != NULL) ?
+							MAX_LOG_BATCH_SIZE : 1),
 					   ALQ_WAITOK);
  
 			if (log_buf != NULL) {
@@ -556,8 +553,7 @@ try_again:
 				bufp = NULL;
 			}
 
-			STAILQ_FOREACH_SAFE(pkt_node, &tmp_pkt_queue, nodes,
-			    pkt_node_temp) {
+			STAILQ_FOREACH(pkt_node, &tmp_pkt_queue, nodes) {
 				tmp_qsize++;
 				if (log_buf != NULL) {
 					ret_sz = siftr_process_pkt(pkt_node,
@@ -568,19 +564,17 @@ try_again:
 
 					bufp += ret_sz;
 					log_buf->ae_bytesused += ret_sz;
-					cnt--;
 				}
-
-				STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
-				free(pkt_node, M_SIFTR_PKTNODE);
-
-				if (cnt <= 0 && !STAILQ_EMPTY(&tmp_pkt_queue)) {
-					alq_post_flags(siftr_alq, log_buf, 0);
-					goto try_again;
-				}
+				if (++cnt >= MAX_LOG_BATCH_SIZE)
+					break;
 			}
 			if (log_buf != NULL) {
 				alq_post_flags(siftr_alq, log_buf, 0);
+			}
+			for (; cnt > 0; cnt--) {
+				pkt_node = STAILQ_FIRST(&tmp_pkt_queue);
+				STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
+				free(pkt_node, M_SIFTR_PKTNODE);
 			}
 		}
 
@@ -1271,6 +1265,9 @@ siftr_manage_ops(uint8_t action)
 		arr = malloc(sizeof(struct flow_search_array) * global_flow_cnt,
 			     M_SIFTR_SEARCHARRAY, M_NOWAIT|M_ZERO);
 
+		if (arr == NULL) {
+			panic("%s: malloc failed for an array of flows", __func__);
+		}
 		/*
 		 * Iterate over the flow hash, printing a summary of each
 		 * flowid seen and freeing any malloc'd memory.
@@ -1279,11 +1276,9 @@ siftr_manage_ops(uint8_t action)
 		for (i = 0, j = 0; i <= siftr_hashmask; i++) {
 			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
 			    tmp_counter) {
-				if (arr != NULL) {
 					arr[j].key = counter->const_info.key;
 					arr[j].nrecord = counter->nrecord;
 					j++;
-				}
 				free(counter, M_SIFTR_HASHNODE);
 			}
 
@@ -1355,6 +1350,9 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 static void
 siftr_shutdown_handler(void *arg)
 {
+	if ((howto & RB_NOSYNC) != 0 || SCHEDULER_STOPPED())
+		return;
+
 	if (siftr_enabled == 1) {
 		siftr_manage_ops(SIFTR_DISABLE);
 	}
