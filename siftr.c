@@ -1348,7 +1348,7 @@ siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS)
 }
 
 static void
-siftr_shutdown_handler(void *arg)
+siftr_shutdown_handler(void *arg, int howto)
 {
 	if ((howto & RB_NOSYNC) != 0 || SCHEDULER_STOPPED())
 		return;
