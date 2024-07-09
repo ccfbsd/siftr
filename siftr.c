@@ -797,7 +797,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * If the pfil hooks don't provide a pointer to the
 	 * inpcb, we need to find it ourselves and lock it.
 	 */
-	if (!inp) {
+	if (inp == NULL) {
 		/* Find the corresponding inpcb for this pkt. */
 		inp = siftr_findinpcb(INP_IPV4, ip, *m, th->th_sport,
 		    th->th_dport, dir, ss);
@@ -944,7 +944,7 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * For inbound packets, the pfil hooks don't provide a pointer to the
 	 * inpcb, so we need to find it ourselves and lock it.
 	 */
-	if (!inp) {
+	if (inp == NULL) {
 		/* Find the corresponding inpcb for this pkt. */
 		inp = siftr_findinpcb(INP_IPV6, (struct ip *)ip6, *m,
 		    th->th_sport, th->th_dport, dir, ss);
@@ -978,7 +978,7 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	hash_node = siftr_find_flow(counter_list, hash_id);
 
 	/* If this flow hasn't been seen before, we create a new entry. */
-	if (!hash_node) {
+	if (hash_node == NULL) {
 		struct flow_info info;
 
 		ip6_sprintf(info.laddr, &inp->in6p_laddr);
@@ -991,7 +991,7 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
 
-	if (!hash_node) {
+	if (hash_node == NULL) {
 		goto inp_unlock6;
 	}
 
