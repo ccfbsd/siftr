@@ -96,6 +96,8 @@
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
+#include <netinet/cc/cc.h>
+#include <netinet/cc/cc_cubic.h>
 
 #ifdef SIFTR_IPV6
 #include <netinet/ip6.h>
@@ -207,6 +209,13 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
+	/* consecutive dup acks recd */
+	uint32_t		dupacks;
+	/* An estimate for the congestion window in the Reno-friendly region */
+	uint32_t		W_est;
+	/* An estimate for the congestion window from cubic_cwnd() */
+	uint32_t		W_cubic;
+	uint32_t		cubic_flags;
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -284,6 +293,7 @@ static struct mtx siftr_pkt_queue_mtx;
 static struct mtx siftr_pkt_mgr_mtx;
 static struct thread *siftr_pkt_manager_thr = NULL;
 static char direction[2] = {'i','o'};
+static eventhandler_tag siftr_shutdown_tag;
 
 /* Required function prototypes. */
 static int siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS);
@@ -442,7 +452,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -473,7 +483,12 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->flowtype,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
-	    pkt_node->data_sz);
+	    pkt_node->data_sz,
+
+	    pkt_node->dupacks,
+	    pkt_node->W_est,
+	    pkt_node->W_cubic,
+	    pkt_node->cubic_flags);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: traffic record size %d larger than max record size %d",
@@ -697,6 +712,8 @@ static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
     int ipver, int dir, int inp_locally_locked)
 {
+	struct cubic *cubic_data = CC_DATA(tp);
+
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
 	pn->rcv_wnd = tp->rcv_wnd;
@@ -716,6 +733,10 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
 	pn->t_segqlen = tp->t_segqlen;
+	pn->dupacks = tp->t_dupacks;
+	pn->W_est = cubic_data->W_est;
+	pn->W_cubic = cubic_data->W_cubic;
+	pn->cubic_flags = cubic_data->flags;
 
 	/* We've finished accessing the tcb so release the lock. */
 	if (inp_locally_locked)
@@ -842,6 +863,9 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.fport = ntohs(inp->inp_fport);
 		info.key = hash_id;
 		info.ipver = INP_IPV4;
+		if (strcmp(CC_ALGO(tp)->name, "cubic") != 0) {
+			panic("%s: cc_algo name is not cubic", __func__);
+		}
 
 		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
@@ -987,6 +1011,9 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.fport = ntohs(inp->inp_fport);
 		info.key = hash_id;
 		info.ipver = INP_IPV6;
+		if (strcmp(CC_ALGO(tp)->name, "cubic") != 0) {
+			panic("%s: cc_algo name is not cubic", __func__);
+		}
 
 		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
@@ -1365,6 +1392,7 @@ static int
 deinit_siftr(void)
 {
 	/* Cleanup. */
+	EVENTHANDLER_DEREGISTER(shutdown_pre_sync, siftr_shutdown_tag);
 	siftr_manage_ops(SIFTR_DISABLE);
 	hashdestroy(counter_hash, M_SIFTR, siftr_hashmask);
 	mtx_destroy(&siftr_pkt_queue_mtx);
@@ -1379,8 +1407,8 @@ deinit_siftr(void)
 static int
 init_siftr(void)
 {
-	EVENTHANDLER_REGISTER(shutdown_pre_sync, siftr_shutdown_handler, NULL,
-	    SHUTDOWN_PRI_FIRST);
+	siftr_shutdown_tag = EVENTHANDLER_REGISTER(shutdown_pre_sync,
+	    siftr_shutdown_handler, NULL, SHUTDOWN_PRI_FIRST);
 
 	/* Initialise our flow counter hash table. */
 	counter_hash = hashinit(SIFTR_EXPECTED_MAX_TCP_FLOWS, M_SIFTR,
