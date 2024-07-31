@@ -97,12 +97,6 @@
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
 
-#ifdef SIFTR_IPV6
-#include <netinet/ip6.h>
-#include <netinet6/ip6_var.h>
-#include <netinet6/in6_fib.h>
-#include <netinet6/in6_pcb.h>
-#endif /* SIFTR_IPV6 */
 
 #include <machine/in_cksum.h>
 
@@ -136,11 +130,7 @@
 /* XXX: Make this a sysctl tunable. */
 #define SIFTR_ALQ_BUFLEN (1000*MAX_LOG_MSG_LEN)
 
-#ifdef SIFTR_IPV6
-#define SIFTR_IPMODE 6
-#else
 #define SIFTR_IPMODE 4
-#endif
 
 static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
 static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode",
@@ -213,13 +203,8 @@ struct pkt_node {
 
 struct flow_info
 {
-#ifdef SIFTR_IPV6
-	char	laddr[INET6_ADDRSTRLEN];	/* local IP address */
-	char	faddr[INET6_ADDRSTRLEN];	/* foreign IP address */
-#else
 	char	laddr[INET_ADDRSTRLEN];		/* local IP address */
 	char	faddr[INET_ADDRSTRLEN];		/* foreign IP address */
-#endif
 	uint16_t	lport;			/* local TCP port */
 	uint16_t	fport;			/* foreign TCP port */
 	uint8_t		ipver;			/* IP version */
@@ -359,8 +344,7 @@ siftr_find_flow(struct listhead *counter_list, uint32_t id)
 }
 
 static inline struct flow_hash_node *
-siftr_new_hash_node(struct flow_info info, int dir,
-		    struct siftr_stats *ss)
+siftr_new_hash_node(struct flow_info info, int dir, struct siftr_stats *ss)
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
@@ -617,8 +601,8 @@ siftr_pkt_manager_thread(void *arg)
  * otherwise.
  */
 static inline struct inpcb *
-siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
-    uint16_t dport, int dir, struct siftr_stats *ss)
+siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
+		int dir, struct siftr_stats *ss)
 {
 	struct inpcb *inp;
 
@@ -626,34 +610,12 @@ siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
 	INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
 
 	if (dir == PFIL_IN)
-		inp = (ipver == INP_IPV4 ?
-		    in_pcblookup(&V_tcbinfo, ip->ip_src, sport, ip->ip_dst,
-		    dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif)
-		    :
-#ifdef SIFTR_IPV6
-		    in6_pcblookup(&V_tcbinfo,
-		    &((struct ip6_hdr *)ip)->ip6_src, sport,
-		    &((struct ip6_hdr *)ip)->ip6_dst, dport, INPLOOKUP_RLOCKPCB,
-		    m->m_pkthdr.rcvif)
-#else
-		    NULL
-#endif
-		    );
+		inp = in_pcblookup(&V_tcbinfo, ip->ip_src, sport, ip->ip_dst,
+				   dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif);
 
 	else
-		inp = (ipver == INP_IPV4 ?
-		    in_pcblookup(&V_tcbinfo, ip->ip_dst, dport, ip->ip_src,
-		    sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif)
-		    :
-#ifdef SIFTR_IPV6
-		    in6_pcblookup(&V_tcbinfo,
-		    &((struct ip6_hdr *)ip)->ip6_dst, dport,
-		    &((struct ip6_hdr *)ip)->ip6_src, sport, INPLOOKUP_RLOCKPCB,
-		    m->m_pkthdr.rcvif)
-#else
-		    NULL
-#endif
-		    );
+		inp = in_pcblookup(&V_tcbinfo, ip->ip_dst, dport, ip->ip_src,
+				   sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif);
 
 	/* If we can't find the inpcb, bail. */
 	if (inp == NULL) {
@@ -667,27 +629,12 @@ siftr_findinpcb(int ipver, struct ip *ip, struct mbuf *m, uint16_t sport,
 }
 
 static inline uint32_t
-siftr_get_flowid(struct inpcb *inp, int ipver, uint32_t *phashtype)
+siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 {
 	if (inp->inp_flowid == 0) {
-#ifdef SIFTR_IPV6
-		if (ipver == INP_IPV6) {
-			return fib6_calc_packet_hash(&inp->in6p_laddr,
-						     &inp->in6p_faddr,
-						     inp->inp_lport,
-						     inp->inp_fport,
-						     IPPROTO_TCP,
-						     phashtype);
-		} else
-#endif
-		{
-			return fib4_calc_packet_hash(inp->inp_laddr,
-						     inp->inp_faddr,
-						     inp->inp_lport,
-						     inp->inp_fport,
-						     IPPROTO_TCP,
-						     phashtype);
-		}
+		return fib4_calc_packet_hash(inp->inp_laddr, inp->inp_faddr,
+					     inp->inp_lport, inp->inp_fport,
+					     IPPROTO_TCP, phashtype);
 	} else {
 		*phashtype = inp->inp_flowtype;
 		return inp->inp_flowid;
@@ -696,7 +643,7 @@ siftr_get_flowid(struct inpcb *inp, int ipver, uint32_t *phashtype)
 
 static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
-    int ipver, int dir, int inp_locally_locked)
+	       int dir, int inp_locally_locked)
 {
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
@@ -800,7 +747,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 */
 	if (inp == NULL) {
 		/* Find the corresponding inpcb for this pkt. */
-		inp = siftr_findinpcb(INP_IPV4, ip, *m, th->th_sport,
+		inp = siftr_findinpcb(ip, *m, th->th_sport,
 		    th->th_dport, dir, ss);
 
 		if (inp == NULL)
@@ -829,7 +776,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	hash_id = siftr_get_flowid(inp, INP_IPV4, &hash_type);
+	hash_id = siftr_get_flowid(inp, &hash_type);
 	counter_list = counter_hash + (hash_id & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, hash_id);
 
@@ -868,7 +815,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
-	siftr_siftdata(pn, inp, tp, INP_IPV4, dir, inp_locally_locked);
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked);
 
 	mtx_lock(&siftr_pkt_queue_mtx);
 	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
@@ -883,158 +830,9 @@ ret:
 	return (PFIL_PASS);
 }
 
-#ifdef SIFTR_IPV6
-static pfil_return_t
-siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
-    void *ruleset __unused, struct inpcb *inp)
-{
-	struct pkt_node *pn;
-	struct ip6_hdr *ip6;
-	struct tcphdr *th;
-	struct tcpcb *tp;
-	struct siftr_stats *ss;
-	unsigned int ip6_hl;
-	int inp_locally_locked, dir;
-	uint32_t hash_id, hash_type;
-	struct listhead *counter_list;
-	struct flow_hash_node *hash_node;
-
-	inp_locally_locked = 0;
-	dir = PFIL_DIR(flags);
-	ss = DPCPU_PTR(ss);
-
-	/*
-	 * m_pullup is not required here because ip6_{input|output}
-	 * already do the heavy lifting for us.
-	 */
-
-	ip6 = mtod(*m, struct ip6_hdr *);
-
-	/*
-	 * Only continue processing if the packet is TCP
-	 * XXX: We should follow the next header fields
-	 * as shown on Pg 6 RFC 2460, but right now we'll
-	 * only check pkts that have no extension headers.
-	 */
-	if (ip6->ip6_nxt != IPPROTO_TCP)
-		goto ret6;
-
-	/*
-	 * Create a tcphdr struct starting at the correct offset
-	 * in the ipv6 packet.
-	 */
-	ip6_hl = sizeof(struct ip6_hdr);
-	th = (struct tcphdr *)((caddr_t)ip6 + ip6_hl);
-
-	/*
-	 * Only pkts selected by the tcp port filter
-	 * can be inserted into the pkt_queue
-	 */
-	if ((siftr_port_filter != 0) &&
-	    (siftr_port_filter != ntohs(th->th_sport)) &&
-	    (siftr_port_filter != ntohs(th->th_dport))) {
-		goto ret6;
-	}
-
-	if (dir == PFIL_IN)
-		ss->n_in++;
-	else
-		ss->n_out++;
-
-	/*
-	 * For inbound packets, the pfil hooks don't provide a pointer to the
-	 * inpcb, so we need to find it ourselves and lock it.
-	 */
-	if (inp == NULL) {
-		/* Find the corresponding inpcb for this pkt. */
-		inp = siftr_findinpcb(INP_IPV6, (struct ip *)ip6, *m,
-		    th->th_sport, th->th_dport, dir, ss);
-
-		if (inp == NULL)
-			goto ret6;
-		else
-			inp_locally_locked = 1;
-	}
-
-	/* Find the TCP control block that corresponds with this packet. */
-	tp = intotcpcb(inp);
-
-	/*
-	 * If we can't find the TCP control block (happens occasionaly for a
-	 * packet sent during the shutdown phase of a TCP connection), or the
-	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
-	 * bail.
-	 */
-	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_tcpcb++;
-		else
-			ss->nskip_out_tcpcb++;
-
-		goto inp_unlock6;
-	}
-
-	hash_id = siftr_get_flowid(inp, INP_IPV6, &hash_type);
-	counter_list = counter_hash + (hash_id & siftr_hashmask);
-	hash_node = siftr_find_flow(counter_list, hash_id);
-
-	/* If this flow hasn't been seen before, we create a new entry. */
-	if (hash_node == NULL) {
-		struct flow_info info;
-
-		ip6_sprintf(info.laddr, &inp->in6p_laddr);
-		ip6_sprintf(info.faddr, &inp->in6p_faddr);
-		info.lport = ntohs(inp->inp_lport);
-		info.fport = ntohs(inp->inp_fport);
-		info.key = hash_id;
-		info.ipver = INP_IPV6;
-
-		hash_node = siftr_new_hash_node(info, dir, ss);
-	}
-
-	if (hash_node == NULL) {
-		goto inp_unlock6;
-	}
-
-	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT|M_ZERO);
-
-	if (pn == NULL) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_malloc++;
-		else
-			ss->nskip_out_malloc++;
-
-		goto inp_unlock6;
-	}
-
-	pn->flowid = hash_id;
-	pn->flowtype = hash_type;
-	pn->th_seq = ntohl(th->th_seq);
-	pn->th_ack = ntohl(th->th_ack);
-	pn->data_sz = ntohs(ip6->ip6_plen) - (th->th_off << 2);
-
-	siftr_siftdata(pn, inp, tp, INP_IPV6, dir, inp_locally_locked);
-
-	mtx_lock(&siftr_pkt_queue_mtx);
-	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
-	mtx_unlock(&siftr_pkt_queue_mtx);
-	goto ret6;
-
-inp_unlock6:
-	if (inp_locally_locked)
-		INP_RUNLOCK(inp);
-
-ret6:
-	return (PFIL_PASS);
-}
-#endif /* #ifdef SIFTR_IPV6 */
 
 VNET_DEFINE_STATIC(pfil_hook_t, siftr_inet_hook);
 #define	V_siftr_inet_hook	VNET(siftr_inet_hook)
-#ifdef SIFTR_IPV6
-VNET_DEFINE_STATIC(pfil_hook_t, siftr_inet6_hook);
-#define	V_siftr_inet6_hook	VNET(siftr_inet6_hook)
-#endif
 static int
 siftr_pfil(int action)
 {
@@ -1062,19 +860,8 @@ siftr_pfil(int action)
 			pla.pa_hook = V_siftr_inet_hook;
 			pla.pa_head = V_inet_pfil_head;
 			(void)pfil_link(&pla);
-#ifdef SIFTR_IPV6
-			pha.pa_mbuf_chk = siftr_chkpkt6;
-			pha.pa_type = PFIL_TYPE_IP6;
-			V_siftr_inet6_hook = pfil_add_hook(&pha);
-			pla.pa_hook = V_siftr_inet6_hook;
-			pla.pa_head = V_inet6_pfil_head;
-			(void)pfil_link(&pla);
-#endif
 		} else if (action == UNHOOK) {
 			pfil_remove_hook(V_siftr_inet_hook);
-#ifdef SIFTR_IPV6
-			pfil_remove_hook(V_siftr_inet6_hook);
-#endif
 		}
 		CURVNET_RESTORE();
 	}
