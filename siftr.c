@@ -81,72 +81,61 @@
 #include <machine/in_cksum.h>
 
 /*
- * Three digit version number refers to X.Y.Z where:
- * X is the major version number
- * Y is bumped to mark backwards incompatible changes
- * Z is bumped to mark backwards compatible changes
+ * The version number X.Y refers:
+ * X is the major version number and Y has backward compatible changes
  */
-#define MODVERSION	__CONCAT(1, __CONCAT(3, 0))
-#define MODVERSION_STR	__XSTRING(MODVERSION)
+#define MODVERSION	__CONCAT(2,0)
+#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(0)
+#define SYS_NAME "FreeBSD"
 
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
 	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
-	SIFTR_LOG_FILE_MODE = 0644,
-	SIFTR_IPMODE = 4,
+	SIFTR_LOG_FILE_MODE = 0644, SIFTR_IPMODE = 4, MAX_LOG_BATCH_SIZE = 3,
 };
-#define SYS_NAME "FreeBSD"
 
 /*
  * Hard upper limit on the length of log messages. Bump this up if you add new
  * data fields such that the line length could exceed the below value.
  */
 enum {
-	MAX_LOG_MSG_LEN = 300, MAX_LOG_BATCH_SIZE = 3,
-	SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+	MAX_LOG_MSG_LEN = 300, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
-static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode",
-    "SIFTR pkt_node struct");
+static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode", "SIFTR pkt_node struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr_hashnode",
-    "SIFTR flow_hash_node struct");
+		     "SIFTR flow_hash_node struct");
 static MALLOC_DEFINE(M_SIFTR_SEARCHARRAY, "siftr_searcharray",
-    "SIFTR flow_search_array struct");
+		     "SIFTR flow_search_array struct");
 
 /* Used as links in the pkt manager queue. */
 struct pkt_node {
-	/* Timestamp of pkt as noted in the pfil hook. */
-	struct timeval		tval;
 	/* Direction pkt is travelling. */
 	enum {
 		DIR_IN = 0,
 		DIR_OUT = 1,
 	}			direction;
+	/* Timestamp of pkt as noted in the pfil hook. */
+	struct timeval		tval;
+	/* Flowid for the connection. */
+	uint32_t		flowid;
 	/* Congestion Window (bytes). */
 	uint32_t		snd_cwnd;
+	/* Slow Start Threshold (bytes). */
+	uint32_t		snd_ssthresh;
 	/* Sending Window (bytes). */
 	uint32_t		snd_wnd;
 	/* Receive Window (bytes). */
 	uint32_t		rcv_wnd;
-	/* More tcpcb flags storage */
-	uint32_t		t_flags2;
-	/* Slow Start Threshold (bytes). */
-	uint32_t		snd_ssthresh;
-	/* Current state of the TCP FSM. */
-	uint8_t			conn_state;
-	/* Max Segment Size (bytes). */
-	uint32_t		mss;
-	/* Smoothed RTT (usecs). */
-	uint32_t		srtt;
-	/* Is SACK enabled? */
-	u_char			sack_enabled;
-	/* Window scaling for snd window. */
-	u_char			snd_scale;
-	/* Window scaling for recv window. */
-	u_char			rcv_scale;
 	/* TCP control block flags. */
 	u_int			t_flags;
+	/* More tcpcb flags storage */
+	u_int			t_flags2;
+	/* Current state of the TCP FSM. */
+	uint8_t			conn_state;
+	/* Smoothed RTT (usecs). */
+	uint32_t		srtt;
 	/* Retransmission timeout (usec). */
 	uint32_t		rto;
 	/* Size of the TCP send buffer in bytes. */
@@ -161,10 +150,7 @@ struct pkt_node {
 	u_int			sent_inflight_bytes;
 	/* Number of segments currently in the reassembly queue. */
 	int			t_segqlen;
-	/* Flowid for the connection. */
-	u_int			flowid;
 	/* Flow type for the connection. */
-	u_int			flowtype;
 	/* TCP sequence number */
 	tcp_seq			th_seq;
 	/* TCP acknowledgement number */
@@ -177,12 +163,20 @@ struct pkt_node {
 
 struct flow_info
 {
+	/* permanent info */
 	char	laddr[INET_ADDRSTRLEN];		/* local IP address */
 	char	faddr[INET_ADDRSTRLEN];		/* foreign IP address */
 	uint16_t	lport;			/* local TCP port */
 	uint16_t	fport;			/* foreign TCP port */
-	uint8_t		ipver;			/* IP version */
 	uint32_t	key;			/* flowid of the connection */
+	uint8_t		ipver;			/* IP version */
+	uint32_t	flowtype;		/* Flow type for the connection. */
+
+	/* infrequently change info */
+	uint32_t	mss;			/* Max Segment Size (bytes). */
+	u_char		sack_enabled;		/* Is SACK enabled? */
+	u_char		snd_scale;		/* Window scaling for snd window. */
+	u_char		rcv_scale;		/* Window scaling for recv window. */
 };
 
 struct flow_hash_node
@@ -394,27 +388,20 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%c,%jd.%06ld,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
+	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
-	    hash_node->const_info.laddr,
-	    hash_node->const_info.lport,
-	    hash_node->const_info.faddr,
-	    hash_node->const_info.fport,
-	    pkt_node->snd_ssthresh,
+	    pkt_node->flowid,
 	    pkt_node->snd_cwnd,
-	    pkt_node->t_flags2,
+	    pkt_node->snd_ssthresh,
 	    pkt_node->snd_wnd,
 	    pkt_node->rcv_wnd,
-	    pkt_node->snd_scale,
-	    pkt_node->rcv_scale,
-	    pkt_node->conn_state,
-	    pkt_node->mss,
-	    pkt_node->srtt,
-	    pkt_node->sack_enabled,
 	    pkt_node->t_flags,
+	    pkt_node->t_flags2,
+	    pkt_node->conn_state,
+	    pkt_node->srtt,
 	    pkt_node->rto,
 	    pkt_node->snd_buf_hiwater,
 	    pkt_node->snd_buf_cc,
@@ -422,17 +409,14 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->rcv_buf_cc,
 	    pkt_node->sent_inflight_bytes,
 	    pkt_node->t_segqlen,
-	    pkt_node->flowid,
-	    pkt_node->flowtype,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
 	    pkt_node->data_sz);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
-		panic("%s: traffic record size %d larger than max record size %d",
+		panic("%s: record size %d larger than max record size %d",
 		      __func__, ret_sz, MAX_LOG_MSG_LEN);
-	}
-	if (ret_sz < 0) {
+	} else if (ret_sz < 0) {
 		panic("%s: an encoding error occurred, return value %d",
 		      __func__, ret_sz);
 	}
@@ -618,12 +602,8 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_wnd = tp->rcv_wnd;
 	pn->t_flags2 = tp->t_flags2;
 	pn->snd_ssthresh = tp->snd_ssthresh;
-	pn->snd_scale = tp->snd_scale;
-	pn->rcv_scale = tp->rcv_scale;
 	pn->conn_state = tp->t_state;
-	pn->mss = tp->t_maxseg;
 	pn->srtt = ((uint64_t)tp->t_srtt * tick) >> TCP_RTT_SHIFT;
-	pn->sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 	pn->t_flags = tp->t_flags;
 	pn->rto = tp->t_rxtcur * tick;
 	pn->snd_buf_hiwater = inp->inp_socket->so_snd.sb_hiwat;
@@ -758,6 +738,12 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.fport = ntohs(inp->inp_fport);
 		info.key = hash_id;
 		info.ipver = INP_IPV4;
+		info.flowtype = hash_type;
+
+		info.mss = tp->t_maxseg;
+		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
+		info.snd_scale = tp->snd_scale;
+		info.rcv_scale = tp->rcv_scale;
 
 		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
@@ -778,7 +764,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	}
 
 	pn->flowid = hash_id;
-	pn->flowtype = hash_type;
 	pn->th_seq = ntohl(th->th_seq);
 	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
