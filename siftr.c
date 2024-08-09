@@ -38,26 +38,6 @@
  * A FreeBSD kernel module that adds very basic intrumentation to the
  * TCP stack, allowing internal stats to be recorded to a log file
  * for experimental, debugging and performance analysis purposes.
- *
- * SIFTR was first released in 2007 by James Healy and Lawrence Stewart whilst
- * working on the NewTCP research project at Swinburne University of
- * Technology's Centre for Advanced Internet Architectures, Melbourne,
- * Australia, which was made possible in part by a grant from the Cisco
- * University Research Program Fund at Community Foundation Silicon Valley.
- * More details are available at:
- *   http://caia.swin.edu.au/urp/newtcp/
- *
- * Work on SIFTR v1.2.x was sponsored by the FreeBSD Foundation as part of
- * the "Enhancing the FreeBSD TCP Implementation" project 2008-2009.
- * More details are available at:
- *   http://www.freebsdfoundation.org/
- *   http://caia.swin.edu.au/freebsd/etcp09/
- *
- * Lawrence Stewart is the current maintainer, and all contact regarding
- * SIFTR should be directed to him via email: lastewart@swin.edu.au
- *
- * Initial release date: June 2007
- * Most recent update: September 2010
  ******************************************************/
 
 #include <sys/param.h>
@@ -106,31 +86,25 @@
  * Y is bumped to mark backwards incompatible changes
  * Z is bumped to mark backwards compatible changes
  */
-#define V_MAJOR		1
-#define V_BACKBREAK	3
-#define V_BACKCOMPAT	0
-#define MODVERSION	__CONCAT(V_MAJOR, __CONCAT(V_BACKBREAK, V_BACKCOMPAT))
-#define MODVERSION_STR	__XSTRING(V_MAJOR) "." __XSTRING(V_BACKBREAK) "." \
-    __XSTRING(V_BACKCOMPAT)
+#define MODVERSION	__CONCAT(1, __CONCAT(3, 0))
+#define MODVERSION_STR	__XSTRING(MODVERSION)
 
-#define HOOK 0
-#define UNHOOK 1
-#define SIFTR_EXPECTED_MAX_TCP_FLOWS 65536
+enum {
+	HOOK = 0, UNHOOK = 1, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
+	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
+	SIFTR_LOG_FILE_MODE = 0644,
+	SIFTR_IPMODE = 4,
+};
 #define SYS_NAME "FreeBSD"
-#define SIFTR_LOG_FILE_MODE 0644
-#define SIFTR_DISABLE 0
-#define SIFTR_ENABLE 1
 
 /*
  * Hard upper limit on the length of log messages. Bump this up if you add new
  * data fields such that the line length could exceed the below value.
  */
-#define MAX_LOG_MSG_LEN 300
-#define MAX_LOG_BATCH_SIZE 3
-/* XXX: Make this a sysctl tunable. */
-#define SIFTR_ALQ_BUFLEN (1000*MAX_LOG_MSG_LEN)
-
-#define SIFTR_IPMODE 4
+enum {
+	MAX_LOG_MSG_LEN = 300, MAX_LOG_BATCH_SIZE = 3,
+	SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+};
 
 static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
 static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode",
@@ -303,12 +277,6 @@ SYSCTL_U16(_net_inet_siftr, OID_AUTO, port_filter, CTLFLAG_RW,
 SYSCTL_BOOL(_net_inet_siftr, OID_AUTO, cwnd_filter, CTLFLAG_RW,
     &siftr_cwnd_filter, 0,
     "enable packet filter to record only variance of TCP congestion window");
-
-/* XXX: TODO
-SYSCTL_UINT(_net_inet_siftr, OID_AUTO, binary, CTLFLAG_RW,
-    &siftr_binary_log, 0,
-    "write log files in binary instead of ascii");
-*/
 
 /* Begin functions. */
 
