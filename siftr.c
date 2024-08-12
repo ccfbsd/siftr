@@ -77,7 +77,6 @@
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
 
-
 #include <machine/in_cksum.h>
 
 /*
@@ -92,13 +91,11 @@ enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
 	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
 	SIFTR_LOG_FILE_MODE = 0644, SIFTR_IPMODE = 4, MAX_LOG_BATCH_SIZE = 3,
-};
-
-/*
- * Hard upper limit on the length of log messages. Bump this up if you add new
- * data fields such that the line length could exceed the below value.
- */
-enum {
+	/*
+	 * Hard upper limit on the length of log messages. Bump this up if you
+	 * add new data fields such that the line length could exceed the below
+	 * value.
+	 */
 	MAX_LOG_MSG_LEN = 300, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
