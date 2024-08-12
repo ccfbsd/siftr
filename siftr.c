@@ -101,10 +101,9 @@ enum {
 
 static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
 static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode", "SIFTR pkt_node struct");
+static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "flow_info", "SIFTR flow_info struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr_hashnode",
 		     "SIFTR flow_hash_node struct");
-static MALLOC_DEFINE(M_SIFTR_SEARCHARRAY, "siftr_searcharray",
-		     "SIFTR flow_search_array struct");
 
 /* Used as links in the pkt manager queue. */
 struct pkt_node {
@@ -174,21 +173,16 @@ struct flow_info
 	u_char		sack_enabled;		/* Is SACK enabled? */
 	u_char		snd_scale;		/* Window scaling for snd window. */
 	u_char		rcv_scale;		/* Window scaling for recv window. */
+
+	uint32_t	nrecord;		/* num of records in the flow */
 };
 
 struct flow_hash_node
 {
 	uint16_t counter;
 	uint32_t last_cwnd;
-	uint32_t nrecord;			/* num of records in the flow */
 	struct flow_info const_info;
 	LIST_ENTRY(flow_hash_node) nodes;
-};
-
-struct flow_search_array
-{
-	uint32_t key;			/* flowid of the connection */
-	uint32_t nrecord;		/* num of records in the flow */
 };
 
 struct siftr_stats
@@ -380,7 +374,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 		}
 	}
 
-	hash_node->nrecord++;
+	hash_node->const_info.nrecord++;
 
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
@@ -741,6 +735,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 		info.snd_scale = tp->snd_scale;
 		info.rcv_scale = tp->rcv_scale;
+		info.nrecord = 0;
 
 		hash_node = siftr_new_hash_node(info, dir, ss);
 	}
@@ -861,10 +856,10 @@ done:
 static int
 compare_nrecord(const void *_a, const void *_b)
 {
-	const struct flow_search_array *a, *b;
+	const struct flow_info *a, *b;
 
-	a = (const struct flow_search_array *)_a;
-	b = (const struct flow_search_array *)_b;
+	a = (const struct flow_info *)_a;
+	b = (const struct flow_info *)_b;
 
 	if (a->nrecord < b->nrecord)
 		return (-1);
@@ -883,7 +878,7 @@ siftr_manage_ops(uint8_t action)
 	struct sbuf *s;
 	int i, j, error;
 	uint32_t bytes_to_write, total_skipped_pkts;
-	struct flow_search_array *arr;
+	struct flow_info *arr;
 
 	error = 0;
 	total_skipped_pkts = 0;
@@ -1000,8 +995,8 @@ siftr_manage_ops(uint8_t action)
 		    max_str_size, alq_getn_fail_cnt);
 
 		/* Create an array to store all flows' keys and records. */
-		arr = malloc(sizeof(struct flow_search_array) * global_flow_cnt,
-			     M_SIFTR_SEARCHARRAY, M_NOWAIT|M_ZERO);
+		arr = malloc(sizeof(struct flow_info) * global_flow_cnt,
+			     M_SIFTR_FLOW_INFO, M_NOWAIT|M_ZERO);
 
 		if (arr == NULL) {
 			panic("%s: malloc failed for an array of flows", __func__);
@@ -1014,12 +1009,9 @@ siftr_manage_ops(uint8_t action)
 		for (i = 0, j = 0; i <= siftr_hashmask; i++) {
 			LIST_FOREACH_SAFE(counter, counter_hash + i, nodes,
 			    tmp_counter) {
-					arr[j].key = counter->const_info.key;
-					arr[j].nrecord = counter->nrecord;
-					j++;
+					arr[j++] = counter->const_info;
 				free(counter, M_SIFTR_HASHNODE);
 			}
-
 			LIST_INIT(counter_hash + i);
 		}
 
@@ -1029,9 +1021,15 @@ siftr_manage_ops(uint8_t action)
 
 		/* sort into ascending ordered list by flow's nrecord */
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
-		sbuf_printf(s, "flowid_list=");
+		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%u,", arr[j].key);
+			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%u,%u,%u,%u,%u;",
+					arr[j].key,
+					arr[j].laddr, arr[j].lport,
+					arr[j].faddr, arr[j].fport,
+					arr[j].mss, arr[j].sack_enabled,
+					arr[j].snd_scale, arr[j].rcv_scale,
+					arr[j].nrecord);
 		}
 
 		sbuf_printf(s, "\n");
@@ -1048,7 +1046,7 @@ siftr_manage_ops(uint8_t action)
 		siftr_alq = NULL;
 		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
 			max_str_size = max_tmp_qsize = global_flow_cnt = 0;
-		free(arr, M_SIFTR_SEARCHARRAY);
+		free(arr, M_SIFTR_FLOW_INFO);
 	} else
 		error = EINVAL;
 
