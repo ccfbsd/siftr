@@ -51,7 +51,6 @@
 #include <sys/mbuf.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
-#include <sys/pcpu.h>
 #include <sys/proc.h>
 #include <sys/reboot.h>
 #include <sys/sbuf.h>
@@ -185,24 +184,6 @@ struct flow_hash_node
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
-struct siftr_stats
-{
-	/* # TCP pkts seen by the SIFTR PFIL hooks, including any skipped. */
-	uint64_t n_in;
-	uint64_t n_out;
-	/* # pkts skipped due to failed malloc calls. */
-	uint32_t nskip_in_malloc;
-	uint32_t nskip_out_malloc;
-	/* # pkts skipped due to failed inpcb lookups. */
-	uint32_t nskip_in_inpcb;
-	uint32_t nskip_out_inpcb;
-	/* # pkts skipped due to failed tcpcb lookups. */
-	uint32_t nskip_in_tcpcb;
-	uint32_t nskip_out_tcpcb;
-};
-
-DPCPU_DEFINE_STATIC(struct siftr_stats, ss);
-
 static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
 static unsigned int siftr_enabled = 0;
 static unsigned int siftr_pkts_per_log = 1;
@@ -297,7 +278,7 @@ siftr_find_flow(struct listhead *counter_list, uint32_t id)
 }
 
 static inline struct flow_hash_node *
-siftr_new_hash_node(struct flow_info info, int dir, struct siftr_stats *ss)
+siftr_new_hash_node(struct flow_info info)
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
@@ -316,12 +297,7 @@ siftr_new_hash_node(struct flow_info info, int dir, struct siftr_stats *ss)
 		global_flow_cnt++;
 		return hash_node;
 	} else {
-		/* malloc failed */
-		if (dir == DIR_IN)
-			ss->nskip_in_malloc++;
-		else
-			ss->nskip_out_malloc++;
-
+		panic("%s: malloc failed", __func__);
 		return NULL;
 	}
 }
@@ -545,7 +521,7 @@ siftr_pkt_manager_thread(void *arg)
  */
 static inline struct inpcb *
 siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
-		int dir, struct siftr_stats *ss)
+		int dir)
 {
 	struct inpcb *inp;
 
@@ -561,13 +537,6 @@ siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
 				   sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif);
 
 	/* If we can't find the inpcb, bail. */
-	if (inp == NULL) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_inpcb++;
-		else
-			ss->nskip_out_inpcb++;
-	}
-
 	return (inp);
 }
 
@@ -635,7 +604,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
-	struct siftr_stats *ss;
 	unsigned int ip_hl;
 	int inp_locally_locked, dir;
 	uint32_t hash_id, hash_type;
@@ -644,7 +612,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	inp_locally_locked = 0;
 	dir = PFIL_DIR(flags);
-	ss = DPCPU_PTR(ss);
 
 	/*
 	 * m_pullup is not required here because ip_{input|output}
@@ -675,19 +642,13 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto ret;
 	}
 
-	if (dir == PFIL_IN)
-		ss->n_in++;
-	else
-		ss->n_out++;
-
 	/*
 	 * If the pfil hooks don't provide a pointer to the
 	 * inpcb, we need to find it ourselves and lock it.
 	 */
 	if (inp == NULL) {
 		/* Find the corresponding inpcb for this pkt. */
-		inp = siftr_findinpcb(ip, *m, th->th_sport,
-		    th->th_dport, dir, ss);
+		inp = siftr_findinpcb(ip, *m, th->th_sport, th->th_dport, dir);
 
 		if (inp == NULL)
 			goto ret;
@@ -706,12 +667,8 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
 	 * bail.
 	 */
-	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_tcpcb++;
-		else
-			ss->nskip_out_tcpcb++;
-
+	if (tp == NULL) {
+		panic("%s: tp not available", __func__);
 		goto inp_unlock;
 	}
 
@@ -737,7 +694,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.rcv_scale = tp->rcv_scale;
 		info.nrecord = 0;
 
-		hash_node = siftr_new_hash_node(info, dir, ss);
+		hash_node = siftr_new_hash_node(info);
 	}
 
 	if (hash_node == NULL) {
@@ -747,11 +704,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT|M_ZERO);
 
 	if (pn == NULL) {
-		if (dir == PFIL_IN)
-			ss->nskip_in_malloc++;
-		else
-			ss->nskip_out_malloc++;
-
+		panic("%s: malloc failed", __func__);
 		goto inp_unlock;
 	}
 
@@ -872,16 +825,14 @@ compare_nrecord(const void *_a, const void *_b)
 static int
 siftr_manage_ops(uint8_t action)
 {
-	struct siftr_stats totalss;
 	struct timeval tval;
 	struct flow_hash_node *counter, *tmp_counter;
 	struct sbuf *s;
 	int i, j, error;
-	uint32_t bytes_to_write, total_skipped_pkts;
+	uint32_t bytes_to_write;
 	struct flow_info *arr;
 
 	error = 0;
-	total_skipped_pkts = 0;
 	arr = NULL;
 
 	/* Init an autosizing sbuf that initially holds 200 chars. */
@@ -897,8 +848,6 @@ siftr_manage_ops(uint8_t action)
 		    SIFTR_LOG_FILE_MODE, SIFTR_ALQ_BUFLEN, 0);
 
 		STAILQ_INIT(&pkt_queue);
-
-		DPCPU_ZERO(ss);
 
 		siftr_exit_pkt_manager_thread = 0;
 		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
@@ -950,46 +899,14 @@ siftr_manage_ops(uint8_t action)
 		siftr_pkt_manager_thr = NULL;
 		mtx_unlock(&siftr_pkt_mgr_mtx);
 
-		totalss.n_in = DPCPU_VARSUM(ss, n_in);
-		totalss.n_out = DPCPU_VARSUM(ss, n_out);
-		totalss.nskip_in_malloc = DPCPU_VARSUM(ss, nskip_in_malloc);
-		totalss.nskip_out_malloc = DPCPU_VARSUM(ss, nskip_out_malloc);
-		totalss.nskip_in_tcpcb = DPCPU_VARSUM(ss, nskip_in_tcpcb);
-		totalss.nskip_out_tcpcb = DPCPU_VARSUM(ss, nskip_out_tcpcb);
-		totalss.nskip_in_inpcb = DPCPU_VARSUM(ss, nskip_in_inpcb);
-		totalss.nskip_out_inpcb = DPCPU_VARSUM(ss, nskip_out_inpcb);
-
-		total_skipped_pkts = totalss.nskip_in_malloc +
-		    totalss.nskip_out_malloc + totalss.nskip_in_tcpcb +
-		    totalss.nskip_out_tcpcb + totalss.nskip_in_inpcb +
-		    totalss.nskip_out_inpcb;
-
 		microtime(&tval);
 
 		sbuf_printf(s,
 		    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
-		    "num_inbound_tcp_pkts=%ju\tnum_outbound_tcp_pkts=%ju\t"
-		    "total_tcp_pkts=%ju\tnum_inbound_skipped_pkts_malloc=%u\t"
-		    "num_outbound_skipped_pkts_malloc=%u\t"
-		    "num_inbound_skipped_pkts_tcpcb=%u\t"
-		    "num_outbound_skipped_pkts_tcpcb=%u\t"
-		    "num_inbound_skipped_pkts_inpcb=%u\t"
-		    "num_outbound_skipped_pkts_inpcb=%u\t"
-		    "total_skipped_tcp_pkts=%u\tglobal_flow_cnt=%u\t"
+		    "global_flow_cnt=%u\t"
 		    "max_tmp_qsize=%u\tavg_tmp_qsize=%ju\tmax_str_size=%u\t"
 		    "alq_getn_fail_cnt=%u\t",
-		    (intmax_t)tval.tv_sec,
-		    tval.tv_usec,
-		    (uintmax_t)totalss.n_in,
-		    (uintmax_t)totalss.n_out,
-		    (uintmax_t)(totalss.n_in + totalss.n_out),
-		    totalss.nskip_in_malloc,
-		    totalss.nskip_out_malloc,
-		    totalss.nskip_in_tcpcb,
-		    totalss.nskip_out_tcpcb,
-		    totalss.nskip_in_inpcb,
-		    totalss.nskip_out_inpcb,
-		    total_skipped_pkts,
+		    (intmax_t)tval.tv_sec, tval.tv_usec,
 		    global_flow_cnt, max_tmp_qsize,
 		    (uintmax_t)(total_tmp_qsize / tmp_q_usecnt),
 		    max_str_size, alq_getn_fail_cnt);
