@@ -95,7 +95,7 @@ enum {
 	 * add new data fields such that the line length could exceed the below
 	 * value.
 	 */
-	MAX_LOG_MSG_LEN = 300, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+	MAX_LOG_MSG_LEN = 200, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
