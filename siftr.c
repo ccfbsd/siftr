@@ -184,20 +184,20 @@ struct flow_hash_node
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
-static volatile unsigned int siftr_exit_pkt_manager_thread = 0;
-static unsigned int siftr_enabled = 0;
-static unsigned int siftr_pkts_per_log = 1;
-static uint16_t     siftr_port_filter = 0;
-static bool siftr_cwnd_filter = 0;
-static unsigned int tmp_qsize = 0;
-static uint64_t total_tmp_qsize = 0;
-static unsigned int tmp_q_usecnt = 0;
-static unsigned int max_tmp_qsize = 0;
-static unsigned int max_str_size = 0;
-static unsigned int alq_getn_fail_cnt = 0;
+static volatile bool siftr_exit_pkt_manager_thread = 0;
+static bool     siftr_enabled = 0;
+static bool     siftr_cwnd_filter = 0;
+static uint16_t siftr_port_filter = 0;
+static uint32_t siftr_pkts_per_log = 1;
 
-/* static unsigned int siftr_binary_log = 0; */
-static unsigned int global_flow_cnt = 0;
+static uint32_t tmp_qsize = 0;
+static uint32_t tmp_q_usecnt = 0;
+static uint32_t total_tmp_qsize = 0;
+static uint32_t max_tmp_qsize = 0;
+static uint32_t max_str_size = 0;
+static uint32_t alq_getn_fail_cnt = 0;
+static uint32_t global_flow_cnt = 0;
+
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr.log";
 static u_long siftr_hashmask;
