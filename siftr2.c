@@ -33,7 +33,7 @@
  */
 
 /******************************************************
- * Statistical Information For TCP Research (SIFTR)
+ * Statistical Information For TCP Research (SIFTR2)
  *
  * A FreeBSD kernel module that adds very basic intrumentation to the
  * TCP stack, allowing internal stats to be recorded to a log file
@@ -98,13 +98,13 @@ enum {
 	MAX_LOG_MSG_LEN = 200, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
-static MALLOC_DEFINE(M_SIFTR, "siftr", "dynamic memory used by SIFTR");
-static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr_pktnode", "SIFTR pkt_node struct");
+static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR");
+static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR pkt_node struct");
 static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "flow_info", "SIFTR flow_info struct");
-static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr_hashnode",
-		     "SIFTR flow_hash_node struct");
+static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode",
+		     "SIFTR2 flow_hash_node struct");
 
-/* Used as links in the pkt manager queue. */
+/* siftr2_pktnode: used as links in the pkt manager queue. */
 struct pkt_node {
 	/* Direction pkt is travelling. */
 	enum {
@@ -176,6 +176,7 @@ struct flow_info
 	uint32_t	nrecord;		/* num of records in the flow */
 };
 
+/* siftr2_hashnode */
 struct flow_hash_node
 {
 	uint16_t counter;
@@ -483,7 +484,7 @@ siftr_pkt_manager_thread(void *arg)
 		}
 
 		if (!STAILQ_EMPTY(&tmp_pkt_queue)) {
-			panic("%s: SIFTR tmp_pkt_queue not empty after flush",
+			panic("%s: SIFTR2 tmp_pkt_queue not empty after flush",
 			      __func__);
 		}
 		tmp_q_usecnt++;
@@ -736,7 +737,7 @@ siftr_pfil(int action)
 	struct pfil_hook_args pha = {
 		.pa_version = PFIL_VERSION,
 		.pa_flags = PFIL_IN | PFIL_OUT,
-		.pa_modname = "siftr",
+		.pa_modname = "siftr2",
 		.pa_rulname = "default",
 	};
 	struct pfil_link_args pla = {
@@ -1088,7 +1089,7 @@ siftr_load_handler(module_t mod, int what, void *arg)
 }
 
 static moduledata_t siftr_mod = {
-	.name = "siftr",
+	.name = "siftr2",
 	.evhand = siftr_load_handler,
 };
 
