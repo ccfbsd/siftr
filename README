@@ -1,5 +1,5 @@
-# siftr
-This is my update to freebsd/siftr, full name "Statistical Information For TCP Research".
+# siftr 2.0
+This is my customized code to the stock freebsd/siftr, full name "Statistical Information For TCP Research".
 
 Its original FreeBSD Manual Page can be found here:
 https://www.freebsd.org/cgi/man.cgi?query=siftr
@@ -7,9 +7,9 @@ https://www.freebsd.org/cgi/man.cgi?query=siftr
 I add a Makefile for local compile, assuming your freebsd source tree is at /usr/src.
 
 defaults:
-sysctl net.inet.siftr
-net.inet.siftr.cwnd_filter: 0
-net.inet.siftr.port_filter: 0
-net.inet.siftr.ppl: 1
-net.inet.siftr.logfile: /var/log/siftr.log
-net.inet.siftr.enabled: 0
+sysctl net.inet.siftr2
+net.inet.siftr2.cwnd_filter: 0
+net.inet.siftr2.port_filter: 0
+net.inet.siftr2.ppl: 1
+net.inet.siftr2.logfile: /var/log/siftr2.log
+net.inet.siftr2.enabled: 0
