@@ -152,6 +152,10 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
+	/* # distinct sack blks present */
+	int			numsacks;
+	/* seq nos. of sack blocks */
+	struct sackblk		sackblks[MAX_SACK_BLKS];
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -357,7 +361,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u\n",
+	    "%u,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -379,7 +383,16 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->t_segqlen,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
-	    pkt_node->data_sz);
+	    pkt_node->data_sz,
+	    pkt_node->numsacks,
+	    pkt_node->sackblks[0].start,
+	    pkt_node->sackblks[0].end,
+	    pkt_node->sackblks[1].start,
+	    pkt_node->sackblks[1].end,
+	    pkt_node->sackblks[2].start,
+	    pkt_node->sackblks[2].end,
+	    pkt_node->sackblks[3].start,
+	    pkt_node->sackblks[3].end);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: record size %d larger than max record size %d",
@@ -445,7 +458,7 @@ siftr_pkt_manager_thread(void *arg)
 						((STAILQ_NEXT(pkt_node, nodes) != NULL) ?
 							MAX_LOG_BATCH_SIZE : 1),
 					   ALQ_WAITOK);
- 
+
 			if (log_buf != NULL) {
 				log_buf->ae_bytesused = 0;
 				bufp = log_buf->ae_data;
@@ -558,6 +571,8 @@ static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	       int dir, int inp_locally_locked)
 {
+	int i;
+
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
 	pn->rcv_wnd = tp->rcv_wnd;
@@ -573,6 +588,17 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
 	pn->t_segqlen = tp->t_segqlen;
+	pn->numsacks = tp->rcv_numsacks;
+	if (tp->rcv_numsacks > 0) {
+		for (i = 0; i < tp->rcv_numsacks; i++) {
+			pn->sackblks[i] = tp->sackblks[i];
+		}
+	} else {
+		for (i = 0; i < MAX_SACK_BLKS; i++) {
+			pn->sackblks[i].start = 0;
+			pn->sackblks[i].end = 0;
+		}
+	}
 
 	/* We've finished accessing the tcb so release the lock. */
 	if (inp_locally_locked)
@@ -667,7 +693,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
 	 * bail.
 	 */
-	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
+	if (tp->rcv_numsacks == 0 || tp->t_state < TCPS_ESTABLISHED) {
 		goto inp_unlock;
 	}
 
