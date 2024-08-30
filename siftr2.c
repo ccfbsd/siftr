@@ -595,8 +595,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 		}
 	} else {
 		for (i = 0; i < MAX_SACK_BLKS; i++) {
-			pn->sackblks[i].start = 0;
-			pn->sackblks[i].end = 0;
+			memset(pn->sackblks, 0, sizeof(pn->sackblks));
 		}
 	}
 
