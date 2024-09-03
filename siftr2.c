@@ -690,7 +690,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
 	 * bail.
 	 */
-	if (tp->rcv_numsacks == 0 || tp->t_state < TCPS_ESTABLISHED) {
+	if (tp->t_state < TCPS_ESTABLISHED) {
 		goto inp_unlock;
 	}
 
