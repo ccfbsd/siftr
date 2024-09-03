@@ -594,9 +594,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 			pn->sackblks[i] = tp->sackblks[i];
 		}
 	} else {
-		for (i = 0; i < MAX_SACK_BLKS; i++) {
-			memset(pn->sackblks, 0, sizeof(pn->sackblks));
-		}
+		memset(pn->sackblks, 0, sizeof(pn->sackblks));
 	}
 
 	/* We've finished accessing the tcb so release the lock. */
