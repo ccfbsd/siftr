@@ -687,7 +687,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.ipver = INP_IPV4;
 		info.flowtype = hash_type;
 
-		info.mss = tp->t_maxseg;
+		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 		info.snd_scale = tp->snd_scale;
 		info.rcv_scale = tp->rcv_scale;
