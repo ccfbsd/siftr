@@ -95,7 +95,7 @@ enum {
 	 * add new data fields such that the line length could exceed the below
 	 * value.
 	 */
-	MAX_LOG_MSG_LEN = 200, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+	MAX_LOG_MSG_LEN = 300, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR");
@@ -152,10 +152,14 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
-	/* # distinct sack blks present */
-	int			numsacks;
+	/* # distinct sack blks present in tcpcb */
+	int			tp_nsacks;
 	/* seq nos. of sack blocks */
-	struct sackblk		sackblks[MAX_SACK_BLKS];
+	struct sackblk		tp_sackblks[MAX_SACK_BLKS];
+	/* # distinct sack blks present in th option */
+	int			to_nsacks;
+	/* seq nos. of sack blocks */
+	struct sackblk		to_sackblks[MAX_SACK_BLKS];
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -361,7 +365,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u\n",
+	    "%u,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%u,%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -384,15 +388,24 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
 	    pkt_node->data_sz,
-	    pkt_node->numsacks,
-	    pkt_node->sackblks[0].start,
-	    pkt_node->sackblks[0].end,
-	    pkt_node->sackblks[1].start,
-	    pkt_node->sackblks[1].end,
-	    pkt_node->sackblks[2].start,
-	    pkt_node->sackblks[2].end,
-	    pkt_node->sackblks[3].start,
-	    pkt_node->sackblks[3].end);
+	    pkt_node->tp_nsacks,
+	    pkt_node->tp_sackblks[0].start,
+	    pkt_node->tp_sackblks[0].end,
+	    pkt_node->tp_sackblks[1].start,
+	    pkt_node->tp_sackblks[1].end,
+	    pkt_node->tp_sackblks[2].start,
+	    pkt_node->tp_sackblks[2].end,
+	    pkt_node->tp_sackblks[3].start,
+	    pkt_node->tp_sackblks[3].end,	// 4 sack blocks is enough
+	    pkt_node->to_nsacks,
+	    pkt_node->to_sackblks[0].start,
+	    pkt_node->to_sackblks[0].end,
+	    pkt_node->to_sackblks[1].start,
+	    pkt_node->to_sackblks[1].end,
+	    pkt_node->to_sackblks[2].start,
+	    pkt_node->to_sackblks[2].end,
+	    pkt_node->to_sackblks[3].start,
+	    pkt_node->to_sackblks[3].end);	// 4 sack blocks is enough
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: record size %d larger than max record size %d",
@@ -571,8 +584,6 @@ static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	       int dir, int inp_locally_locked)
 {
-	int i;
-
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
 	pn->rcv_wnd = tp->rcv_wnd;
@@ -588,13 +599,13 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
 	pn->t_segqlen = tp->t_segqlen;
-	pn->numsacks = tp->rcv_numsacks;
+	pn->tp_nsacks = tp->rcv_numsacks;
 	if (tp->rcv_numsacks > 0) {
-		for (i = 0; i < tp->rcv_numsacks; i++) {
-			pn->sackblks[i] = tp->sackblks[i];
+		for (int i = 0; i < tp->rcv_numsacks; i++) {
+			pn->tp_sackblks[i] = tp->sackblks[i];
 		}
 	} else {
-		memset(pn->sackblks, 0, sizeof(pn->sackblks));
+		memset(pn->tp_sackblks, 0, sizeof(pn->tp_sackblks));
 	}
 
 	/* We've finished accessing the tcb so release the lock. */
@@ -632,9 +643,11 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	uint32_t hash_id, hash_type;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
+	struct tcpopt to;
 
 	inp_locally_locked = 0;
 	dir = PFIL_DIR(flags);
+	memset(&to, 0, sizeof(to));
 
 	/*
 	 * m_pullup is not required here because ip_{input|output}
@@ -734,6 +747,21 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	pn->th_seq = ntohl(th->th_seq);
 	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
+
+	tcp_dooptions(&to, (u_char *)(th + 1),
+		      (th->th_off << 2) - sizeof(struct tcphdr), 0);
+	pn->to_nsacks = to.to_nsacks;
+
+	if (to.to_nsacks == 0) {
+		memset(pn->to_sackblks, 0, sizeof(pn->to_sackblks));
+	} else {
+		struct sackblk sack;
+		for (int i = 0; i < to.to_nsacks; i++) {
+			bcopy(to.to_sacks + i * TCPOLEN_SACK, &sack, sizeof(sack));
+			pn->to_sackblks[i].start = ntohl(sack.start);
+			pn->to_sackblks[i].end = ntohl(sack.end);
+		}
+	}
 
 	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked);
 
