@@ -75,6 +75,8 @@
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
+#include <netinet/cc/cc.h>
+#include <netinet/cc/cc_cubic.h>
 
 #include <machine/in_cksum.h>
 
@@ -152,6 +154,8 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
+	/* TCP congestion control CUBIC internal struct */
+	struct cubic		cubic_data;
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -445,7 +449,7 @@ siftr_pkt_manager_thread(void *arg)
 						((STAILQ_NEXT(pkt_node, nodes) != NULL) ?
 							MAX_LOG_BATCH_SIZE : 1),
 					   ALQ_WAITOK);
- 
+
 			if (log_buf != NULL) {
 				log_buf->ae_bytesused = 0;
 				bufp = log_buf->ae_data;
@@ -573,6 +577,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
 	pn->t_segqlen = tp->t_segqlen;
+	pn->cubic_data = *(struct cubic *)CC_DATA(tp);
 
 	/* We've finished accessing the tcb so release the lock. */
 	if (inp_locally_locked)
