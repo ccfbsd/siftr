@@ -97,7 +97,7 @@ enum {
 	 * add new data fields such that the line length could exceed the below
 	 * value.
 	 */
-	MAX_LOG_MSG_LEN = 200, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+	MAX_LOG_MSG_LEN = 300, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR");
@@ -154,8 +154,22 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
-	/* TCP congestion control CUBIC internal struct */
-	struct cubic		cubic_data;
+	/* send next */
+	tcp_seq			snd_nxt;
+	/* sent but unacknowledged */
+	tcp_seq			snd_una;
+	/* an estimate of bytes in the network */
+	int			pipe;
+	/* new data to be in the network in response to this ack */
+	int			snd_cnt;
+	/* consecutive dup acks recd */
+	int			dupacks;
+	/* function name that updated cwnd */
+	char			fun_name[30];
+	/* line number that updated cwnd */
+	int			line;
+	/* SACK scoreboard hint */
+	struct sackhint		sackhint;
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -360,8 +374,8 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u\n",
+	    "%c,%jd.%06ld,%u,%8u,%8u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u," //data_sz
+	    "%u,%u,%d,%d,%s,%d,%d,%d,%d,%d,%d,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -383,7 +397,19 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->t_segqlen,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
-	    pkt_node->data_sz);
+	    pkt_node->data_sz,
+	    pkt_node->snd_nxt,			// new data starts here: 1
+	    pkt_node->snd_una,			// 2
+	    pkt_node->pipe,			// 3
+	    pkt_node->snd_cnt,			// 4
+	    pkt_node->fun_name,			// 5
+	    pkt_node->line,			// 6
+	    pkt_node->dupacks,			// 7
+	    pkt_node->sackhint.delivered_data,	// 8
+	    pkt_node->sackhint.sack_bytes_rexmit,	// 9
+	    pkt_node->sackhint.sacked_bytes,		// 10
+	    pkt_node->sackhint.lost_bytes,		// 11
+	    pkt_node->sackhint.recover_fs);		// 12
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: record size %d larger than max record size %d",
@@ -576,8 +602,15 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_hiwater = inp->inp_socket->so_rcv.sb_hiwat;
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
+	pn->snd_nxt = tp->snd_nxt;
+	pn->snd_una = tp->snd_una;
+	pn->pipe = tp->pipe;
+	pn->snd_cnt = tp->snd_cnt;
 	pn->t_segqlen = tp->t_segqlen;
-	pn->cubic_data = *(struct cubic *)CC_DATA(tp);
+	pn->dupacks = tp->t_dupacks;
+	(void)strlcpy(pn->fun_name, tp->fun_name, sizeof(pn->fun_name));
+	pn->line = tp->line;
+	pn->sackhint = tp->sackhint;
 
 	/* We've finished accessing the tcb so release the lock. */
 	if (inp_locally_locked)

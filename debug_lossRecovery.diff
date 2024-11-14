@@ -1,0 +1,500 @@
+diff --git a/sys/netinet/cc/cc.c b/sys/netinet/cc/cc.c
+index c628be250abf..753ba3c059bf 100644
+--- a/sys/netinet/cc/cc.c
++++ b/sys/netinet/cc/cc.c
+@@ -637,6 +637,14 @@ cc_stop_new_assignments(struct cc_algo *algo)
+ 	return (0);
+ }
+ 
++void inline
++cc_update_cwnd(struct tcpcb *tp, uint32_t new, const char *name, int line)
++{
++	tp->snd_cwnd = new;
++	(void)strlcpy(tp->fun_name, name, sizeof(tp->fun_name));
++	tp->line = line;
++}
++
+ /*
+  * Handles kld related events. Returns 0 on success, non-zero on failure.
+  */
+diff --git a/sys/netinet/cc/cc.h b/sys/netinet/cc/cc.h
+index 890bea69a14b..6137ae9c1f7d 100644
+--- a/sys/netinet/cc/cc.h
++++ b/sys/netinet/cc/cc.h
+@@ -245,5 +245,7 @@ void cc_attach(struct tcpcb *, struct cc_algo *);
+ /* Called to detach a CC algorithm from a tcpcb */
+ void cc_detach(struct tcpcb *);
+ 
++void cc_update_cwnd(struct tcpcb *tp, uint32_t new, const char *name, int line);
++
+ #endif /* _KERNEL */
+ #endif /* _NETINET_CC_CC_H_ */
+diff --git a/sys/netinet/cc/cc_cubic.c b/sys/netinet/cc/cc_cubic.c
+index c4b44d5c3660..5c7a898fe3f8 100644
+--- a/sys/netinet/cc/cc_cubic.c
++++ b/sys/netinet/cc/cc_cubic.c
+@@ -227,9 +227,12 @@ cubic_does_slow_start(struct cc_var *ccv, struct cubic *cubicd)
+ 		cubic_log_hystart_event(ccv, cubicd, 3, incr);
+ 	}
+ 	/* ABC is on by default, so incr equals 0 frequently. */
+-	if (incr > 0)
+-		CCV(ccv, snd_cwnd) = min((cw + incr),
+-					 TCP_MAXWIN << CCV(ccv, snd_scale));
++	if (incr > 0) {
++		uint32_t new_win = min((cw + incr), TCP_MAXWIN << CCV(ccv, snd_scale));
++		cc_update_cwnd(ccv->tp, new_win, __func__, __LINE__);
++//		CCV(ccv, snd_cwnd) = min((cw + incr),
++//					 TCP_MAXWIN << CCV(ccv, snd_scale));
++	}
+ }
+ 
+ static void
+@@ -290,6 +293,7 @@ cubic_ack_received(struct cc_var *ccv, ccsignal_t type)
+ 			}
+ 
+ 			W_est = tf_cwnd(ccv);
++			cubic_data->W_est = W_est;
+ 
+ 			/*
+ 			 * The mean RTT is used to best reflect the equations in
+@@ -300,13 +304,15 @@ cubic_ack_received(struct cc_var *ccv, ccsignal_t type)
+ 					     cubic_data->W_max,
+ 					     CCV(ccv, t_maxseg),
+ 					     cubic_data->K);
++			cubic_data->W_cubic = W_cubic;
+ 
+ 			if (W_cubic < W_est) {
+ 				/*
+ 				 * TCP-friendly region, follow tf
+ 				 * cwnd growth.
+ 				 */
+-				CCV(ccv, snd_cwnd) = ulmin(W_est, INT_MAX);
++				cc_update_cwnd(ccv->tp, ulmin(W_est, INT_MAX), __func__, __LINE__);
++//				CCV(ccv, snd_cwnd) = ulmin(W_est, INT_MAX);
+ 				cubic_data->flags |= CUBICFLAG_IN_TF;
+ 			} else if (CCV(ccv, snd_cwnd) < W_cubic) {
+ 				/*
+@@ -314,7 +320,8 @@ cubic_ack_received(struct cc_var *ccv, ccsignal_t type)
+ 				 * cwnd growth.
+ 				 * Only update snd_cwnd, if it doesn't shrink.
+ 				 */
+-				CCV(ccv, snd_cwnd) = ulmin(W_cubic, INT_MAX);
++				cc_update_cwnd(ccv->tp, ulmin(W_cubic, INT_MAX), __func__, __LINE__);
++//				CCV(ccv, snd_cwnd) = ulmin(W_cubic, INT_MAX);
+ 				cubic_data->flags &= ~CUBICFLAG_IN_TF;
+ 			}
+ 
+@@ -486,7 +493,8 @@ cubic_cong_signal(struct cc_var *ccv, ccsignal_t type)
+ 		}
+ 		cubic_data->flags |= CUBICFLAG_CONG_EVENT | CUBICFLAG_RTO_EVENT;
+ 		cubic_data->undo_W_max = cubic_data->W_max;
+-		CCV(ccv, snd_cwnd) = mss;
++		cc_update_cwnd(ccv->tp, mss, __func__, __LINE__);
++//		CCV(ccv, snd_cwnd) = mss;
+ 		break;
+ 
+ 	case CC_RTO_ERR:
+@@ -535,6 +543,8 @@ cubic_post_recovery(struct cc_var *ccv)
+ 
+ 	cubic_data = ccv->cc_data;
+ 	pipe = 0;
++	uint32_t new_win = 0;
++
+ 
+ 	if (IN_FASTRECOVERY(CCV(ccv, t_flags))) {
+ 		/*
+@@ -549,18 +559,24 @@ cubic_post_recovery(struct cc_var *ccv)
+ 		else
+ 			pipe = CCV(ccv, snd_max) - ccv->curack;
+ 
+-		if (pipe < CCV(ccv, snd_ssthresh))
++		if (pipe < CCV(ccv, snd_ssthresh)) {
+ 			/*
+ 			 * Ensure that cwnd does not collapse to 1 MSS under
+ 			 * adverse conditions. Implements RFC6582
+ 			 */
+-			CCV(ccv, snd_cwnd) = max(pipe, CCV(ccv, t_maxseg)) +
+-			    CCV(ccv, t_maxseg);
+-		else
++			new_win = max(pipe, CCV(ccv, t_maxseg)) + CCV(ccv, t_maxseg);
++			cc_update_cwnd(ccv->tp, new_win, __func__, __LINE__);
++//			CCV(ccv, snd_cwnd) = max(pipe, CCV(ccv, t_maxseg)) +
++//			    CCV(ccv, t_maxseg);
++		} else {
+ 			/* Update cwnd based on beta and adjusted W_max. */
+-			CCV(ccv, snd_cwnd) = max(((uint64_t)cubic_data->W_max *
+-			    CUBIC_BETA) >> CUBIC_SHIFT,
+-			    2 * CCV(ccv, t_maxseg));
++			new_win = max(((uint64_t)cubic_data->W_max * CUBIC_BETA) >> CUBIC_SHIFT,
++				      2 * CCV(ccv, t_maxseg));
++			cc_update_cwnd(ccv->tp, new_win, __func__, __LINE__);
++//			CCV(ccv, snd_cwnd) = max(((uint64_t)cubic_data->W_max *
++//			    CUBIC_BETA) >> CUBIC_SHIFT,
++//			    2 * CCV(ccv, t_maxseg));
++		}
+ 	}
+ 
+ 	/* Calculate the average RTT between congestion epochs. */
+@@ -721,7 +737,8 @@ cubic_newround(struct cc_var *ccv, uint32_t round_cnt)
+ 			} else {
+ 				CCV(ccv, snd_ssthresh) = cubicd->css_lowrtt_fas;
+ 			}
+-			CCV(ccv, snd_cwnd) = cubicd->css_fas_at_css_entry;
++			cc_update_cwnd(ccv->tp, cubicd->css_fas_at_css_entry, __func__, __LINE__);
++//			CCV(ccv, snd_cwnd) = cubicd->css_fas_at_css_entry;
+ 			cubicd->css_entered_at_round = round_cnt;
+ 		} else {
+ 			CCV(ccv, snd_ssthresh) = CCV(ccv, snd_cwnd);
+diff --git a/sys/netinet/cc/cc_cubic.h b/sys/netinet/cc/cc_cubic.h
+index b4773618e6f8..2a50d66c1ce5 100644
+--- a/sys/netinet/cc/cc_cubic.h
++++ b/sys/netinet/cc/cc_cubic.h
+@@ -64,7 +64,7 @@
+ /* ~0.4 << CUBIC_SHIFT. */
+ #define	CUBIC_C_FACTOR		102
+ 
+-/* CUBIC fast convergence factor: (1+beta_cubic)/2. */
++/* CUBIC fast convergence factor: (1+beta_cubic)/2 == 1.7/2 == 0.85 */
+ #define	CUBIC_FC_FACTOR		217
+ 
+ /* Don't trust s_rtt until this many rtt samples have been taken. */
+@@ -96,6 +96,8 @@ struct cubic {
+ 	uint64_t	W_max;
+ 	/* An estimate for the congestion window in the Reno-friendly region */
+ 	uint64_t	W_est;
++	/* An estimate for the congestion window in the CUBIC region */
++	uint64_t	W_cubic;
+ 	/* The cwnd at the beginning of the current congestion avoidance stage */
+ 	uint64_t	cwnd_epoch;
+ 	/*
+diff --git a/sys/netinet/tcp_input.c b/sys/netinet/tcp_input.c
+index e5f5e09e57d8..5c175e5a9a33 100644
+--- a/sys/netinet/tcp_input.c
++++ b/sys/netinet/tcp_input.c
+@@ -402,9 +402,11 @@ cc_conn_init(struct tcpcb *tp)
+ 	 * requiring us to be cautious.
+ 	 */
+ 	if (tp->snd_cwnd == 1)
+-		tp->snd_cwnd = maxseg;		/* SYN(-ACK) lost */
++		cc_update_cwnd(tp, maxseg, __func__, __LINE__);
++//		tp->snd_cwnd = maxseg;		/* SYN(-ACK) lost */
+ 	else
+-		tp->snd_cwnd = tcp_compute_initwnd(maxseg);
++		cc_update_cwnd(tp, tcp_compute_initwnd(maxseg), __func__, __LINE__);
++//		tp->snd_cwnd = tcp_compute_initwnd(maxseg);
+ 
+ 	if (CC_ALGO(tp)->conn_init != NULL)
+ 		CC_ALGO(tp)->conn_init(&tp->t_ccv);
+@@ -451,7 +453,8 @@ cc_cong_signal(struct tcpcb *tp, struct tcphdr *th, uint32_t type)
+ 	case CC_RTO_ERR:
+ 		TCPSTAT_INC(tcps_sndrexmitbad);
+ 		/* RTO was unnecessary, so reset everything. */
+-		tp->snd_cwnd = tp->snd_cwnd_prev;
++//		tp->snd_cwnd = tp->snd_cwnd_prev;
++		cc_update_cwnd(tp, tp->snd_cwnd_prev, __func__, __LINE__);
+ 		tp->snd_ssthresh = tp->snd_ssthresh_prev;
+ 		tp->snd_recover = tp->snd_recover_prev;
+ 		if (tp->t_flags & TF_WASFRECOVERY)
+@@ -2670,20 +2673,26 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
+ 								tp->sackhint.sack_bytes_rexmit;
+ 						}
+ 						if (awnd < tp->snd_ssthresh) {
+-							tp->snd_cwnd += imax(maxseg,
+-							    imin(2 * maxseg,
+-							    tp->sackhint.delivered_data));
++							uint32_t new_win = tp->snd_cwnd + imax(maxseg, imin(2 * maxseg, tp->sackhint.delivered_data));
++							cc_update_cwnd(tp, new_win, __func__, __LINE__);
++//							tp->snd_cwnd += imax(maxseg,
++//							    imin(2 * maxseg,
++//							    tp->sackhint.delivered_data));
+ 							if (tp->snd_cwnd > tp->snd_ssthresh)
+-								tp->snd_cwnd = tp->snd_ssthresh;
++								cc_update_cwnd(tp, tp->snd_ssthresh, __func__, __LINE__);
++//								tp->snd_cwnd = tp->snd_ssthresh;
+ 						}
+ 					} else if (tcp_is_sack_recovery(tp, &to) &&
+ 						    IN_FASTRECOVERY(tp->t_flags) &&
+ 						    SEQ_LT(tp->snd_nxt, tp->snd_max)) {
+-						tp->snd_cwnd += imax(maxseg,
+-						    imin(2 * maxseg,
+-						    tp->sackhint.delivered_data));
++						uint32_t new_win = tp->snd_cwnd += imax(maxseg, imin(2 * maxseg, tp->sackhint.delivered_data));
++						cc_update_cwnd(tp, new_win, __func__, __LINE__);
++//						tp->snd_cwnd += imax(maxseg,
++//						    imin(2 * maxseg,
++//						    tp->sackhint.delivered_data));
+ 					} else {
+-						tp->snd_cwnd += maxseg;
++						cc_update_cwnd(tp, tp->snd_cwnd + maxseg, __func__, __LINE__);
++//						tp->snd_cwnd += maxseg;
+ 					}
+ 					(void) tcp_output(tp);
+ 					goto drop;
+@@ -2760,25 +2769,31 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
+ 						tcp_resend_sackholes(tp);
+ 						/* Avoid inflating cwnd in tcp_output */
+ 						tp->snd_nxt = tp->snd_max;
+-						tp->snd_cwnd = tcp_compute_pipe(tp) +
+-						    maxseg;
++						cc_update_cwnd(tp, tcp_compute_pipe(tp) + maxseg,
++								__func__, __LINE__);
++//						tp->snd_cwnd = tcp_compute_pipe(tp) +
++//						    maxseg;
+ 						(void) tcp_output(tp);
+ 						/* Set cwnd to the expected flightsize */
+-						tp->snd_cwnd = tp->snd_ssthresh;
++						cc_update_cwnd(tp, tp->snd_ssthresh, __func__, __LINE__);
++//						tp->snd_cwnd = tp->snd_ssthresh;	// cc: add flag
+ 						if (SEQ_GT(th->th_ack, tp->snd_una)) {
+ 							goto resume_partialack;
+ 						}
+ 						goto drop;
+ 					}
+ 					tp->snd_nxt = th->th_ack;
+-					tp->snd_cwnd = maxseg;
++					cc_update_cwnd(tp, maxseg, __func__, __LINE__);
++//					tp->snd_cwnd = maxseg;
+ 					(void) tcp_output(tp);
+ 					KASSERT(tp->snd_limited <= 2,
+ 					    ("%s: tp->snd_limited too big",
+ 					    __func__));
+-					tp->snd_cwnd = tp->snd_ssthresh +
+-					     maxseg *
+-					     (tp->t_dupacks - tp->snd_limited);
++					cc_update_cwnd(tp, tp->snd_ssthresh + maxseg * (tp->t_dupacks - tp->snd_limited),
++							__func__, __LINE__);
++//					tp->snd_cwnd = tp->snd_ssthresh +
++//					     maxseg *
++//					     (tp->t_dupacks - tp->snd_limited);
+ 					if (SEQ_GT(onxt, tp->snd_nxt))
+ 						tp->snd_nxt = onxt;
+ 					goto drop;
+@@ -2807,13 +2822,17 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
+ 						tp->snd_limited = 0;
+ 					if ((tp->snd_nxt == tp->snd_max) &&
+ 					    (tp->t_rxtshift == 0))
+-						tp->snd_cwnd =
+-						    SEQ_SUB(tp->snd_nxt,
+-							    tp->snd_una) -
+-							tcp_sack_adjust(tp);
+-					tp->snd_cwnd +=
+-					    (tp->t_dupacks - tp->snd_limited) *
+-					    maxseg;
++						cc_update_cwnd(tp, SEQ_SUB(tp->snd_nxt, tp->snd_una) - tcp_sack_adjust(tp),
++								__func__, __LINE__);
++//						tp->snd_cwnd =
++//						    SEQ_SUB(tp->snd_nxt,
++//							    tp->snd_una) -
++//							tcp_sack_adjust(tp);
++					cc_update_cwnd(tp, tp->snd_cwnd + (tp->t_dupacks - tp->snd_limited) * maxseg,
++							__func__, __LINE__);
++//					tp->snd_cwnd +=
++//					    (tp->t_dupacks - tp->snd_limited) *
++//					    maxseg;
+ 					/*
+ 					 * Only call tcp_output when there
+ 					 * is new data available to be sent
+@@ -2839,7 +2858,8 @@ tcp_do_segment(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th,
+ 					} else if (sent > 0) {
+ 						++tp->snd_limited;
+ 					}
+-					tp->snd_cwnd = oldcwnd;
++					cc_update_cwnd(tp, oldcwnd, __func__, __LINE__);
++//					tp->snd_cwnd = oldcwnd;
+ 					goto drop;
+ 				}
+ 			}
+@@ -4117,6 +4137,7 @@ tcp_do_prr_ack(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to,
+ 		pipe = imax(0, tp->snd_max - tp->snd_una -
+ 			    imin(INT_MAX / 65536, tp->t_dupacks) * maxseg);
+ 	}
++	tp->pipe = pipe;
+ 	tp->sackhint.prr_delivered += del_data;
+ 	/*
+ 	 * Proportional Rate Reduction
+@@ -4150,6 +4171,7 @@ tcp_do_prr_ack(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to,
+ 		snd_cnt = imin((tp->snd_ssthresh - pipe), limit);
+ 	}
+ 	snd_cnt = imax(snd_cnt, 0) / maxseg;
++	tp->snd_cnt = snd_cnt * maxseg;
+ 	/*
+ 	 * Send snd_cnt new data into the network in response to this ack.
+ 	 * If there is going to be a SACK retransmission, adjust snd_cwnd
+@@ -4157,15 +4179,21 @@ tcp_do_prr_ack(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to,
+ 	 */
+ 	if (IN_FASTRECOVERY(tp->t_flags)) {
+ 		if (tcp_is_sack_recovery(tp, to)) {
+-			tp->snd_cwnd = pipe - del_data + (snd_cnt * maxseg);
++			cc_update_cwnd(tp, pipe - del_data + (snd_cnt * maxseg), __func__, __LINE__);
++//			tp->snd_cwnd = pipe - del_data + (snd_cnt * maxseg);
+ 		} else {
+-			tp->snd_cwnd = (tp->snd_max - tp->snd_una) +
+-					    (snd_cnt * maxseg);
++			cc_update_cwnd(tp, (tp->snd_max - tp->snd_una) + (snd_cnt * maxseg), __func__, __LINE__);
++//			tp->snd_cwnd = (tp->snd_max - tp->snd_una) +
++//					    (snd_cnt * maxseg);
+ 		}
+ 	} else if (IN_CONGRECOVERY(tp->t_flags)) {
+-		tp->snd_cwnd = pipe - del_data + (snd_cnt * maxseg);
++		cc_update_cwnd(tp, pipe - del_data + (snd_cnt * maxseg), __func__, __LINE__);
++//		tp->snd_cwnd = pipe - del_data + (snd_cnt * maxseg);
+ 	}
+-	tp->snd_cwnd = imax(maxseg, tp->snd_cwnd);
++	if (maxseg > tp->snd_cwnd) {
++		cc_update_cwnd(tp, imax(maxseg, tp->snd_cwnd), __func__, __LINE__);	// cc: check again
++	}
++//	tp->snd_cwnd = imax(maxseg, tp->snd_cwnd);
+ }
+ 
+ /*
+@@ -4191,10 +4219,12 @@ tcp_newreno_partial_ack(struct tcpcb *tp, struct tcphdr *th)
+ 		 * Set snd_cwnd to one segment beyond acknowledged offset.
+ 		 * (tp->snd_una has not yet been updated when this function is called.)
+ 		 */
+-		tp->snd_cwnd = maxseg + BYTES_THIS_ACK(tp, th);
++		cc_update_cwnd(tp, maxseg + BYTES_THIS_ACK(tp, th), __func__, __LINE__);
++//		tp->snd_cwnd = maxseg + BYTES_THIS_ACK(tp, th);
+ 		tp->t_flags |= TF_ACKNOW;
+ 		(void) tcp_output(tp);
+-		tp->snd_cwnd = ocwnd;
++		cc_update_cwnd(tp, ocwnd, __func__, __LINE__);
++//		tp->snd_cwnd = ocwnd;
+ 		if (SEQ_GT(onxt, tp->snd_nxt))
+ 			tp->snd_nxt = onxt;
+ 	}
+@@ -4203,10 +4233,14 @@ tcp_newreno_partial_ack(struct tcpcb *tp, struct tcphdr *th)
+ 	 * not updated yet.
+ 	 */
+ 	if (tp->snd_cwnd > BYTES_THIS_ACK(tp, th))
+-		tp->snd_cwnd -= BYTES_THIS_ACK(tp, th);
++		cc_update_cwnd(tp, tp->snd_cwnd - BYTES_THIS_ACK(tp, th), __func__, __LINE__);
++//		tp->snd_cwnd -= BYTES_THIS_ACK(tp, th);
+ 	else
+-		tp->snd_cwnd = 0;
+-	tp->snd_cwnd += maxseg;
++		cc_update_cwnd(tp, 0, __func__, __LINE__);
++//		tp->snd_cwnd = 0;
++
++	cc_update_cwnd(tp, tp->snd_cwnd + maxseg, __func__, __LINE__);
++//	tp->snd_cwnd += maxseg;
+ }
+ 
+ int
+diff --git a/sys/netinet/tcp_output.c b/sys/netinet/tcp_output.c
+index 860b785b631b..c9b1447b9320 100644
+--- a/sys/netinet/tcp_output.c
++++ b/sys/netinet/tcp_output.c
+@@ -1695,7 +1695,8 @@ tcp_default_output(struct tcpcb *tp)
+ 			return (error);
+ 		case ENOBUFS:
+ 			TCP_XMIT_TIMER_ASSERT(tp, len, flags);
+-			tp->snd_cwnd = tp->t_maxseg;
++			cc_update_cwnd(tp, tp->t_maxseg, __func__, __LINE__);
++//			tp->snd_cwnd = tp->t_maxseg;
+ 			return (0);
+ 		case EMSGSIZE:
+ 			/*
+diff --git a/sys/netinet/tcp_sack.c b/sys/netinet/tcp_sack.c
+index f642acd4c46a..82e0ea15b597 100644
+--- a/sys/netinet/tcp_sack.c
++++ b/sys/netinet/tcp_sack.c
+@@ -962,8 +962,10 @@ tcp_sack_partialack(struct tcpcb *tp, struct tcphdr *th, u_int *maxsegp)
+ 	if ((BYTES_THIS_ACK(tp, th) / maxseg) >= 2)
+ 		num_segs = 2;
+ 	if (tp->snd_nxt == tp->snd_max) {
+-		tp->snd_cwnd = (tp->sackhint.sack_bytes_rexmit +
+-		    (tp->snd_nxt - tp->snd_recover) + num_segs * maxseg);
++		uint32_t new_win = tp->sackhint.sack_bytes_rexmit + (tp->snd_nxt - tp->snd_recover) + num_segs * maxseg;
++		cc_update_cwnd(tp, new_win, __func__, __LINE__);
++//		tp->snd_cwnd = (tp->sackhint.sack_bytes_rexmit +
++//		    (tp->snd_nxt - tp->snd_recover) + num_segs * maxseg);
+ 	} else {
+ 		/*
+ 		 * Since cwnd is not the expected flightsize during
+@@ -972,7 +974,8 @@ tcp_sack_partialack(struct tcpcb *tp, struct tcphdr *th, u_int *maxsegp)
+ 		 */
+ 	}
+ 	if (tp->snd_cwnd > tp->snd_ssthresh)
+-		tp->snd_cwnd = tp->snd_ssthresh;
++		cc_update_cwnd(tp, tp->snd_ssthresh, __func__, __LINE__);
++//		tp->snd_cwnd = tp->snd_ssthresh;
+ 	tp->t_flags |= TF_ACKNOW;
+ 	/*
+ 	 * RFC6675 rescue retransmission
+@@ -1152,7 +1155,8 @@ tcp_sack_lost_retransmission(struct tcpcb *tp, struct tcphdr *th)
+ 		 * prior to invoking another cwnd reduction by the CC
+ 		 * module, to not shrink it excessively.
+ 		 */
+-		tp->snd_cwnd = tp->snd_ssthresh;
++		cc_update_cwnd(tp, tp->snd_ssthresh, __func__, __LINE__);
++//		tp->snd_cwnd = tp->snd_ssthresh;
+ 		/*
+ 		 * Formally exit recovery, and let the CC module adjust
+ 		 * ssthresh as intended.
+@@ -1165,7 +1169,8 @@ tcp_sack_lost_retransmission(struct tcpcb *tp, struct tcphdr *th)
+ 		 * cwnd will be adjusted by SACK or PRR processing
+ 		 * subsequently, only set it to a safe value here.
+ 		 */
+-		tp->snd_cwnd = tcp_maxseg(tp);
++		cc_update_cwnd(tp, tcp_maxseg(tp), __func__, __LINE__);
++//		tp->snd_cwnd = tcp_maxseg(tp);
+ 		tp->sackhint.recover_fs = (tp->snd_max - tp->snd_una) -
+ 					    tp->sackhint.recover_fs;
+ 	}
+diff --git a/sys/netinet/tcp_subr.c b/sys/netinet/tcp_subr.c
+index 668d218b34a8..b8754921a6d2 100644
+--- a/sys/netinet/tcp_subr.c
++++ b/sys/netinet/tcp_subr.c
+@@ -2341,7 +2341,8 @@ tcp_newtcpcb(struct inpcb *inp, struct tcpcb *listening_tcb)
+ 	tp->t_rttvar = ((tcp_rexmit_initial - TCPTV_SRTTBASE) << TCP_RTTVAR_SHIFT) / 4;
+ 	tp->t_rttmin = tcp_rexmit_min;
+ 	tp->t_rxtcur = tcp_rexmit_initial;
+-	tp->snd_cwnd = TCP_MAXWIN << TCP_MAX_WINSHIFT;
++	cc_update_cwnd(tp, (TCP_MAXWIN << TCP_MAX_WINSHIFT), __func__, __LINE__);
++//	tp->snd_cwnd = TCP_MAXWIN << TCP_MAX_WINSHIFT;
+ 	tp->snd_ssthresh = TCP_MAXWIN << TCP_MAX_WINSHIFT;
+ 	tp->t_rcvtime = ticks;
+ 	/* We always start with ticks granularity */
+diff --git a/sys/netinet/tcp_syncache.c b/sys/netinet/tcp_syncache.c
+index d0068a9d313b..6d6d1d6e4c5b 100644
+--- a/sys/netinet/tcp_syncache.c
++++ b/sys/netinet/tcp_syncache.c
+@@ -961,7 +961,8 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
+ 	 * NB: sc_rxmits counts all SYN,ACK transmits, not just retransmits.
+ 	 */
+ 	if (sc->sc_rxmits > 1)
+-		tp->snd_cwnd = 1;
++		cc_update_cwnd(tp, 1, __func__, __LINE__);
++//		tp->snd_cwnd = 1;
+ 
+ #ifdef TCP_OFFLOAD
+ 	/*
+diff --git a/sys/netinet/tcp_timer.c b/sys/netinet/tcp_timer.c
+index c5c65dda5b1a..60e9aeca9d27 100644
+--- a/sys/netinet/tcp_timer.c
++++ b/sys/netinet/tcp_timer.c
+@@ -589,7 +589,8 @@ tcp_timer_rexmt(struct tcpcb *tp)
+ 		 * If the SYN was retransmitted, indicate CWND to be
+ 		 * limited to 1 segment in cc_conn_init().
+ 		 */
+-		tp->snd_cwnd = 1;
++		cc_update_cwnd(tp, 1, __func__, __LINE__);
++//		tp->snd_cwnd = 1;
+ 	} else if (tp->t_rxtshift == 1) {
+ 		/*
+ 		 * first retransmit; record ssthresh and cwnd so they can
+diff --git a/sys/netinet/tcp_var.h b/sys/netinet/tcp_var.h
+index 9f28e8247e3e..3aba32301110 100644
+--- a/sys/netinet/tcp_var.h
++++ b/sys/netinet/tcp_var.h
+@@ -352,6 +352,10 @@ struct tcpcb {
+ 	tcp_seq snd_up;			/* send urgent pointer */
+ 	uint32_t snd_wnd;		/* send window */
+ 	uint32_t snd_cwnd;		/* congestion-controlled window */
++	int	pipe;			/* an estimate of bytes in the network */
++	int	snd_cnt;		/* new data to be in the network in response to this ack */
++	char	fun_name[30];		/* function name that updated cwnd */
++	int	line;			/* line number that updated cwnd */
+ 	uint32_t ts_offset;		/* our timestamp offset */
+ 	uint32_t rfbuf_ts;		/* recv buffer autoscaling timestamp */
+ 	int	rcv_numsacks;		/* # distinct sack blks present */
